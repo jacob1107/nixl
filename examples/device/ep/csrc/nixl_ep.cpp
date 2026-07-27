@@ -852,31 +852,14 @@ Buffer::ht_dispatch(const torch::stable::Tensor &x,
         recv_gbl_rank_prefix_sum = cached_recv_gbl_rank_prefix_sum.value();
 
         // Just a barrier and clean flags
-        ht::cached_notify(
-            hidden_int4,
-            num_scales,
-            num_topk,
-            num_topk,
-            max_num_ranks,
-            num_channels,
-            0,
-            nullptr,
-            nullptr,
-            nullptr,
-            nullptr,
-            rdma_buffer_ptr,
-            config.num_max_rdma_chunked_recv_tokens,
-            buffer_ptrs_gpu,
-            config.num_max_nvl_chunked_recv_tokens,
-            barrier_signal_ptrs_gpu,
-            rank,
-            comm_stream,
-            config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), max_num_ranks),
-            num_nvl_bytes,
-            timeout_cycles,
-            true,
-            low_latency_mode,
-            gpu_ctx);
+        ht::cached_notify(hidden_int4, num_scales, num_topk, num_topk,
+                                 num_ranks, num_channels, 0, nullptr,
+                                 nullptr, nullptr, nullptr,
+                                 rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
+                                 buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
+                                 barrier_signal_ptrs_gpu, rank, comm_stream,
+                                 config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+                                 num_nvl_bytes, timeout_cycles, true, gpu_ctx);
     } else {
         const int64_t rdma_channel_sizes[] = {num_rdma_ranks, num_channels};
         rdma_channel_prefix_matrix =
@@ -917,38 +900,18 @@ Buffer::ht_dispatch(const torch::stable::Tensor &x,
         for (int i = 0; i < num_local_experts; ++i) {
             moe_recv_expert_counter[i] = -1;
         }
-        ht::notify_dispatch(
-            num_tokens_per_rank->const_data_ptr<int>(),
-            moe_recv_counter_mapped,
-            max_num_ranks,
-            num_tokens_per_rdma_rank->const_data_ptr<int>(),
-            moe_recv_rdma_counter_mapped,
-            num_tokens_per_expert->const_data_ptr<int>(),
-            moe_recv_expert_counter_mapped,
-            num_experts,
-            is_token_in_rank.const_data_ptr<bool>(),
-            num_tokens,
-            num_channels,
-            hidden_int4,
-            num_scales,
-            num_topk,
-            expert_alignment,
-            rdma_channel_prefix_matrix.mutable_data_ptr<int>(),
-            recv_rdma_rank_prefix_sum.mutable_data_ptr<int>(),
-            gbl_channel_prefix_matrix.mutable_data_ptr<int>(),
-            recv_gbl_rank_prefix_sum.mutable_data_ptr<int>(),
-            rdma_buffer_ptr,
-            config.num_max_rdma_chunked_recv_tokens,
-            buffer_ptrs_gpu,
-            config.num_max_nvl_chunked_recv_tokens,
-            barrier_signal_ptrs_gpu,
-            rank,
-            comm_stream,
-            config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), max_num_ranks),
-            num_nvl_bytes,
-            timeout_cycles,
-            low_latency_mode,
-            gpu_ctx);
+        ht::notify_dispatch(num_tokens_per_rank->data_ptr<int>(), moe_recv_counter_mapped, num_ranks,
+                                   num_tokens_per_rdma_rank->data_ptr<int>(), moe_recv_rdma_counter_mapped,
+                                   num_tokens_per_expert->data_ptr<int>(), moe_recv_expert_counter_mapped, num_experts,
+                                   is_token_in_rank.data_ptr<bool>(), num_tokens, num_channels,
+                                   hidden_int4, num_scales, num_topk, expert_alignment,
+                                   rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
+                                   gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
+                                   rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
+                                   buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
+                                   barrier_signal_ptrs_gpu, rank, comm_stream,
+                                   config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+                                   num_nvl_bytes, timeout_cycles, gpu_ctx);
 
         // Synchronize total received tokens and tokens per expert
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -1088,45 +1051,21 @@ Buffer::ht_dispatch(const torch::stable::Tensor &x,
 
     // Launch data dispatch
     // NOTES: the buffer size checks are moved into the `.cu` file
-    ht::dispatch(recv_x.mutable_data_ptr(),
-                 recv_x_scales_ptr,
-                 recv_topk_idx_ptr,
-                 recv_topk_weights_ptr,
-                 recv_src_meta_ptr,
-                 x.const_data_ptr(),
-                 x_scales_ptr,
-                 topk_idx_ptr,
-                 topk_weights_ptr,
-                 send_rdma_head_ptr,
-                 send_nvl_head_ptr,
-                 recv_rdma_channel_prefix_matrix_ptr,
-                 recv_gbl_channel_prefix_matrix_ptr,
-                 rdma_channel_prefix_matrix.mutable_data_ptr<int>(),
-                 recv_rdma_rank_prefix_sum.mutable_data_ptr<int>(),
-                 gbl_channel_prefix_matrix.mutable_data_ptr<int>(),
-                 recv_gbl_rank_prefix_sum.mutable_data_ptr<int>(),
-                 is_token_in_rank.const_data_ptr<bool>(),
-                 num_tokens,
-                 hidden_int4,
-                 num_scales,
-                 num_topk,
-                 num_experts,
-                 scale_token_stride,
-                 scale_hidden_stride,
-                 rdma_buffer_ptr,
-                 config.num_max_rdma_chunked_send_tokens,
-                 config.num_max_rdma_chunked_recv_tokens,
-                 buffer_ptrs_gpu,
-                 config.num_max_nvl_chunked_send_tokens,
-                 config.num_max_nvl_chunked_recv_tokens,
-                 rank,
-                 max_num_ranks,
-                 cached_mode,
-                 comm_stream,
-                 num_channels,
-                 timeout_cycles,
-                 low_latency_mode,
-                 gpu_ctx);
+    ht::dispatch(recv_x.data_ptr(), recv_x_scales_ptr, recv_topk_idx_ptr, recv_topk_weights_ptr,
+                        recv_src_meta_ptr,
+                        x.data_ptr(), x_scales_ptr, topk_idx_ptr, topk_weights_ptr,
+                        send_rdma_head_ptr, send_nvl_head_ptr,
+                        recv_rdma_channel_prefix_matrix_ptr,
+                        recv_gbl_channel_prefix_matrix_ptr,
+                        rdma_channel_prefix_matrix.data_ptr<int>(), recv_rdma_rank_prefix_sum.data_ptr<int>(),
+                        gbl_channel_prefix_matrix.data_ptr<int>(), recv_gbl_rank_prefix_sum.data_ptr<int>(),
+                        is_token_in_rank.data_ptr<bool>(),
+                        num_tokens, hidden_int4, num_scales, num_topk, num_experts,
+                        scale_token_stride, scale_hidden_stride,
+                        rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
+                        buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
+                        rank, num_ranks, cached_mode,
+                        comm_stream, num_channels, timeout_cycles, gpu_ctx);
 
     // Wait streams
     const EventHandle *event = nullptr;
@@ -1262,30 +1201,15 @@ Buffer::ht_combine(const torch::stable::Tensor &x,
                    config.num_max_nvl_chunked_recv_tokens / num_rdma_ranks);
 
     // Launch barrier and reset queue head and tail
-    ht::cached_notify(hidden_int4,
-                      0,
-                      0,
-                      num_topk,
-                      num_ranks,
-                      num_channels,
-                      num_combined_tokens,
-                      combined_rdma_head.mutable_data_ptr<int>(),
-                      rdma_channel_prefix_matrix.mutable_data_ptr<int>(),
-                      rdma_rank_prefix_sum.mutable_data_ptr<int>(),
-                      combined_nvl_head.mutable_data_ptr<int>(),
-                      rdma_buffer_ptr,
-                      config.num_max_rdma_chunked_recv_tokens,
-                      buffer_ptrs_gpu,
-                      config.num_max_nvl_chunked_recv_tokens,
-                      barrier_signal_ptrs_gpu,
-                      rank,
-                      comm_stream,
-                      config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
-                      num_nvl_bytes,
-                      timeout_cycles,
-                      false,
-                      low_latency_mode,
-                      gpu_ctx);
+    ht::cached_notify(hidden_int4, 0, 0, num_topk,
+                             num_ranks, num_channels,
+                             num_combined_tokens, combined_rdma_head.data_ptr<int>(),
+                             rdma_channel_prefix_matrix.data_ptr<int>(), rdma_rank_prefix_sum.data_ptr<int>(), combined_nvl_head.data_ptr<int>(),
+                             rdma_buffer_ptr, config.num_max_rdma_chunked_recv_tokens,
+                             buffer_ptrs_gpu, config.num_max_nvl_chunked_recv_tokens,
+                             barrier_signal_ptrs_gpu, rank, comm_stream,
+                             config.get_rdma_buffer_size_hint(hidden_int4 * sizeof(int4), num_ranks),
+                             num_nvl_bytes, timeout_cycles, false, gpu_ctx);
 
     // Assign bias pointers
     const std::optional<torch::stable::Tensor> bias_opts[] = {bias_0, bias_1};
@@ -1308,36 +1232,15 @@ Buffer::ht_combine(const torch::stable::Tensor &x,
                                            cuda_device,
                                            std::nullopt,
                                            std::nullopt);
-    ht::combine(combined_x.mutable_data_ptr(),
-                combined_topk_weights_ptr,
-                is_combined_token_in_rank.const_data_ptr<bool>(),
-                x.const_data_ptr(),
-                topk_weights_ptr,
-                bias_ptrs[0],
-                bias_ptrs[1],
-                combined_rdma_head.mutable_data_ptr<int>(),
-                combined_nvl_head.mutable_data_ptr<int>(),
-                src_meta.const_data_ptr(),
-                rdma_channel_prefix_matrix.mutable_data_ptr<int>(),
-                rdma_rank_prefix_sum.mutable_data_ptr<int>(),
-                gbl_channel_prefix_matrix.mutable_data_ptr<int>(),
-                num_tokens,
-                num_combined_tokens,
-                hidden,
-                num_topk,
-                rdma_buffer_ptr,
-                config.num_max_rdma_chunked_send_tokens,
-                config.num_max_rdma_chunked_recv_tokens,
-                buffer_ptrs_gpu,
-                config.num_max_nvl_chunked_send_tokens,
-                config.num_max_nvl_chunked_recv_tokens,
-                rank,
-                num_ranks,
-                comm_stream,
-                num_channels,
-                timeout_cycles,
-                low_latency_mode,
-                gpu_ctx);
+    ht::combine(combined_x.data_ptr(), combined_topk_weights_ptr,
+                       is_combined_token_in_rank.data_ptr<bool>(),
+                       x.data_ptr(), topk_weights_ptr, bias_ptrs[0], bias_ptrs[1],
+                       combined_rdma_head.data_ptr<int>(), combined_nvl_head.data_ptr<int>(),
+                       src_meta.data_ptr(), rdma_channel_prefix_matrix.data_ptr<int>(), rdma_rank_prefix_sum.data_ptr<int>(), gbl_channel_prefix_matrix.data_ptr<int>(),
+                       num_tokens, num_combined_tokens, hidden, num_topk,
+                       rdma_buffer_ptr, config.num_max_rdma_chunked_send_tokens, config.num_max_rdma_chunked_recv_tokens,
+                       buffer_ptrs_gpu, config.num_max_nvl_chunked_send_tokens, config.num_max_nvl_chunked_recv_tokens,
+                       rank, num_ranks, comm_stream, num_channels, timeout_cycles, gpu_ctx);
 
     // Wait streams
     const EventHandle *event = nullptr;
@@ -1890,7 +1793,8 @@ void Buffer::_nixl_agent_init() {
 
     const char* num_channels_env = std::getenv("NIXL_EP_NUM_CHANNELS");
     init_params["ucx_num_device_channels"] = num_channels_env ? num_channels_env : "4";
-    init_params["ucx_error_handling_mode"] = "none";
+    init_params["ucx_error_handling_mode"] = "peer";
+    init_params["ucx_ep_close_force"] = "yes";
     init_params["num_workers"] = std::to_string(1);
 
     nixlBackendH* ucx_backend = nullptr;
