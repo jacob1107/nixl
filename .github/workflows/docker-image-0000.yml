@@ -14,7 +14,7 @@
 # Memory: nixlbench uses BuildKit `--build-context` (COPY --from=nixl / --from=nixlbench),
 #   so it CANNOT use the legacy-builder `--memory` cap. Peak RAM is controlled by lowering
 #   NPROC (grpc + AWS SDK are the hogs). Default 4 fits a 16 GB runner.
-name: Build NIXLBench Image-88888
+name: Build NIXLBench Image-mooncake
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ on:
         default: true
 
   push:
-    branches: [main]
+    branches: [my-v1.3.1-mooncake]
     # Only when something the nixlbench image actually bakes in changes.
     paths:
       - "benchmark/nixlbench/**"
@@ -200,5 +200,5 @@ jobs:
           no-cache: ${{ steps.cfg.outputs.no_cache == 'true' }}
           provenance: false
           sbom: false
-          tags: jacob1107/backend-vllm:nixl-latest-0909
+          tags: jacob1107/backend-vllm:nixl-latest-mooncake-1.3.1
       
