@@ -123,6 +123,9 @@ ARG LIBFABRIC_VERSION="v1.21.0"
 ARG NPROC
 ARG ABSL_TAG="lts_2025_08_14"
 ARG GRPC_TAG="v1.73.0"
+ARG BUILD_MOONCAKE="true"
+ARG MOONCAKE_REPO="https://github.com/kvcache-ai/Mooncake.git"
+ARG MOONCAKE_REF="v0.3.12"
 
 WORKDIR /workspace
 
@@ -256,12 +259,38 @@ COPY --from=nixlbench . /workspace/nixlbench
 
 WORKDIR /workspace/nixl
 
+# Optionally build and install the Mooncake transfer_engine so that Meson's
+# cc.find_library('transfer_engine') discovers it and the Mooncake NIXL backend
+# plugin is built. UCX is left untouched; Mooncake is selected at runtime.
+RUN if [ "$BUILD_MOONCAKE" = "true" ]; then \
+        echo "=== BUILD_MOONCAKE=true: building Mooncake transfer_engine ===" && \
+        cd /usr/local/src && \
+        git clone "$MOONCAKE_REPO" mooncake && \
+        cd mooncake && \
+        git checkout $MOONCAKE_REF && \
+        bash dependencies.sh && \
+        mkdir -p build && cd build && \
+        cmake .. -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
+        make -j${NPROC:-$(nproc)} && \
+        make install && \
+        ldconfig; \
+    else \
+        echo "BUILD_MOONCAKE=false, skipping Mooncake transfer_engine build"; \
+    fi
+
 RUN rm -rf build && \
     mkdir build && \
     meson setup build --prefix=/usr/local/nixl --buildtype=$BUILD_TYPE && \
     cd build && \
     ninja -j${NPROC:-$(nproc)} && \
     ninja install
+
+# Fail fast if Mooncake was requested but its plugin did not get built (e.g.
+# libtransfer_engine was not discoverable by Meson).
+RUN if [ "$BUILD_MOONCAKE" = "true" ]; then \
+        test -f "/usr/local/nixl/lib/$ARCH-linux-gnu/plugins/libplugin_Mooncake.so" \
+            || { echo "ERROR: BUILD_MOONCAKE=true but libplugin_Mooncake.so was not built"; exit 1; }; \
+    fi
 
 RUN echo "/usr/local/nixl/lib/$ARCH-linux-gnu" > /etc/ld.so.conf.d/nixl.conf && \
     echo "/usr/local/nixl/lib/$ARCH-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf && \

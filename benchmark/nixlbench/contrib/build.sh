@@ -25,6 +25,9 @@ DOCKER_FILE="${SOURCE_DIR}/Dockerfile"
 UCX_SRC=""
 UCX_BUILD_CONTEXT_ARGS=""
 BUILD_TYPE="release"
+BUILD_MOONCAKE="true"
+MOONCAKE_REPO=${MOONCAKE_REPO:-https://github.com/kvcache-ai/Mooncake.git}
+MOONCAKE_REF=${MOONCAKE_REF:-main}
 commit_id=$(git rev-parse --short HEAD)
 
 # Get latest TAG and add COMMIT_ID for dev
@@ -120,6 +123,25 @@ get_options() {
                 missing_requirement $1
             fi
             ;;
+        --build-mooncake)
+            BUILD_MOONCAKE="true"
+            ;;
+        --mooncake-repo)
+            if [ "$2" ]; then
+                MOONCAKE_REPO=$2
+                shift
+            else
+                missing_requirement $1
+            fi
+            ;;
+        --mooncake-ref)
+            if [ "$2" ]; then
+                MOONCAKE_REF=$2
+                shift
+            else
+                missing_requirement $1
+            fi
+            ;;
         --arch)
             if [ "$2" ]; then
                 ARCH=$2
@@ -164,6 +186,11 @@ show_build_options() {
     echo "Building NIXLBench Image"
     echo "NIXL Source: ${NIXL_SRC}"
     echo "UCX Source: ${UCX_SRC} (optional)"
+    if [ "$BUILD_MOONCAKE" = "true" ]; then
+        echo "Mooncake backend: Enabled (repo: ${MOONCAKE_REPO} ref: ${MOONCAKE_REF})"
+    else
+        echo "Mooncake backend: Disabled"
+    fi
     echo "Build Type: ${BUILD_TYPE}"
     echo "Image Tag: ${TAG}"
     echo "Build Context: ${BUILD_CONTEXT}"
@@ -180,6 +207,9 @@ show_help() {
     echo "  [--base-image-tag base image tag]"
     echo "  [--nixlbench path/to/nixlbench/source/dir]"
     echo "  [--ucx path/to/ucx/source/dir]"
+    echo "  [--build-mooncake build and install the Mooncake transfer_engine so the Mooncake NIXL backend is built (UCX is kept)]"
+    echo "  [--mooncake-repo Mooncake git repository URL (default: ${MOONCAKE_REPO})]"
+    echo "  [--mooncake-ref Mooncake git reference (branch, tag, or sha) (default: ${MOONCAKE_REF})]"
     echo "  [--build-type [debug|release] to select build type]"
     echo "  [--no-cache disable docker build cache]"
     echo "  [--python-versions python versions to build for, comma separated]"
@@ -205,6 +235,9 @@ BUILD_ARGS+=" --build-arg WHL_PLATFORM=$WHL_PLATFORM"
 BUILD_ARGS+=" --build-arg ARCH=$ARCH"
 BUILD_ARGS+=" --build-arg BUILD_TYPE=$BUILD_TYPE"
 BUILD_ARGS+=" --build-arg NPROC=$NPROC"
+BUILD_ARGS+=" --build-arg BUILD_MOONCAKE=$BUILD_MOONCAKE"
+BUILD_ARGS+=" --build-arg MOONCAKE_REPO=$MOONCAKE_REPO"
+BUILD_ARGS+=" --build-arg MOONCAKE_REF=$MOONCAKE_REF"
 
 show_build_options
 
