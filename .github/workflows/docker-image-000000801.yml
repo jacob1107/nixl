@@ -1,0 +1,238 @@
+# Standalone NIXLBench image build — fully independent of the nixl image workflow.
+#
+# Why a dedicated workflow?
+#   The nixlbench Dockerfile (benchmark/nixlbench/contrib/Dockerfile) is far heavier
+#   than the nixl one: it compiles abseil, gRPC, libfabric, etcd-cpp-api, the AWS SDK,
+#   the Azure SDK and gusli from source. A cold build is hours; the single biggest
+#   optimization is reusing those layers across runs, so this workflow drives the build
+#   through `docker/build-push-action` with a GitHub Actions (BuildKit) layer cache.
+#
+#   The build-args and the `nixl` / `nixlbench` named build-contexts below mirror exactly
+#   what benchmark/nixlbench/contrib/build.sh passes, so the Dockerfile semantics are
+#   unchanged — only the driver (buildx) and caching differ.
+#
+# Memory: nixlbench uses BuildKit `--build-context` (COPY --from=nixl / --from=nixlbench),
+#   so it CANNOT use the legacy-builder `--memory` cap. Peak RAM is controlled by lowering
+#   NPROC (grpc + AWS SDK are the hogs). Default 4 fits a 16 GB runner.
+#
+# Version pinning (v1.3.1):
+#   - NIXL source is checked out at tag v1.3.1 (input `nixl_ref`, default v1.3.1).
+#   - NIXLBench source lives under benchmark/nixlbench/ in the same repo, so the same
+#     ref applies. Both build-contexts (`nixl` and `nixlbench`) are derived from that
+#     single checkout, keeping versions consistent.
+#   - The image tag defaults to `v1.3.1` (or `v1.3.1-<short-sha>` for branch builds).
+
+name: Build NIXLBench Image (my-v1.3.1-mooncake)
+
+on:
+  workflow_dispatch:
+    inputs:
+      nixl_ref:
+        description: "NIXL git ref to build (tag/branch/full SHA). Default v1.3.1"
+        default: "my-v1.3.1-mooncake"
+        required: true
+      build_type:
+        description: "Build type"
+        type: choice
+        default: release
+        options: [release, debug]
+      python_versions:
+        description: "Python versions for the wheel stage (comma separated)"
+        default: "3.12"
+      arch:
+        description: "Target arch (aarch64 cross-builds via QEMU — very slow for this image)"
+        type: choice
+        default: x86_64
+        options: [x86_64, aarch64]
+      nproc:
+        description: "Parallel compile jobs (peak memory scales with this). Lower = less RAM."
+        default: "4"
+      base_image:
+        description: "Base image (nvcr.io/...). Empty = Dockerfile default (cuda-dl-base 25.10)."
+        default: ""
+      base_image_tag:
+        description: "Base image tag. Empty = Dockerfile default."
+        default: ""
+      no_cache:
+        description: "Ignore BuildKit cache (full rebuild)"
+        type: boolean
+        default: false
+      push:
+        description: "Push the built image to GHCR"
+        type: boolean
+        default: true
+
+  push:
+    branches: [main]
+    # Only when something the nixlbench image actually bakes in changes.
+    paths:
+      - "benchmark/nixlbench/**"
+      - "src/**"
+      - "meson.build"
+      - "meson.options"
+      - "pyproject.toml"
+      - ".github/workflows/build-nixlbench.yml"
+
+  pull_request:
+    paths:
+      - "benchmark/nixlbench/**"
+      - "src/**"
+      - "meson.build"
+      - "meson.options"
+      - "pyproject.toml"
+      - ".github/workflows/build-nixlbench.yml"
+
+env:
+  # NGC base image (nvcr.io) pull auth. Optional for public nvcr.io/nvidia/* images;
+  # required for private/base images or to avoid anonymous rate limits.
+  # Set NGC_API_KEY in repo Settings -> Secrets -> Actions. nvcr.io login user is the
+  # literal "$oauthtoken".
+  NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+  NGC_USER: "$oauthtoken"
+
+permissions:
+  contents: read
+  packages: write # push image to ghcr.io
+
+jobs:
+  build-nixlbench:
+    name: Build nixlbench image (my-v1.3.1-mooncake)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240 # heavy: compiles grpc/AWS/Azure SDK from source
+    steps:
+      - name: Checkout NIXL source at my-v1.3.1-mooncake
+        # fetch-depth: 0 — the image version derives from git rev/tags.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.nixl_ref || 'my-v1.3.1-mooncake' }}
+
+      - name: Verify checked-out version
+        run: |
+          echo "=== Git describe ==="
+          git describe --tags --always || true
+          echo "=== Latest tag ==="
+          git describe --tags --abbrev=0 2>/dev/null || echo "no tag"
+          echo "=== Short SHA ==="
+          git rev-parse --short HEAD
+          echo "=== benchmark/nixlbench exists? ==="
+          ls -la benchmark/nixlbench/contrib/Dockerfile
+          ls -la benchmark/nixlbench/contrib/build.sh
+
+      - name: Lowercase repository owner (GHCR path must be lowercase)
+        id: owner
+        run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build configuration
+        id: cfg
+        run: |
+          set -eu
+          arch="${{ github.event.inputs.arch || 'x86_64' }}"
+          build_type="${{ github.event.inputs.build_type || 'release' }}"
+          python_versions="${{ github.event.inputs.python_versions || '3.12' }}"
+          nproc="${{ github.event.inputs.nproc || '4' }}"
+          base_image="${{ github.event.inputs.base_image || '' }}"
+          base_image_tag="${{ github.event.inputs.base_image_tag || '' }}"
+          no_cache="${{ github.event.inputs.no_cache || 'false' }}"
+
+          # Wheel platform tag mirrors build.sh: manylinux_2_39_<arch>.
+          whl_platform="manylinux_2_39_${arch}"
+
+          # Push policy:
+          #   - workflow_dispatch: respect the `push` input
+          #   - push to tag:       always push
+          #   - branch push / PR:  build-only (load into local docker for verification)
+          push="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ github.event.inputs.push }}" = "true" ] && push="true"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            push="true"
+          fi
+
+          # Image tag:
+          #   - If we're on the v1.3.1 tag exactly, use "v1.3.1".
+          #   - Otherwise, append the short commit so dev builds are distinguishable.
+          current_ref="${{ github.ref_name }}"
+          if [ "$current_ref" = "my-v1.3.1-mooncake" ]; then
+            version="my-v1.3.1-mooncake"
+          else
+            short_sha="$(git rev-parse --short HEAD)"
+            version="my-v1.3.1-mooncake-${short_sha}"
+          fi
+          image="ghcr.io/${{ steps.owner.outputs.name }}/nixlbench:${version}"
+
+          echo "arch=${arch}"               >> "$GITHUB_OUTPUT"
+          echo "build_type=${build_type}"   >> "$GITHUB_OUTPUT"
+          echo "python_versions=${python_versions}" >> "$GITHUB_OUTPUT"
+          echo "nproc=${nproc}"             >> "$GITHUB_OUTPUT"
+          echo "base_image=${base_image}"   >> "$GITHUB_OUTPUT"
+          echo "base_image_tag=${base_image_tag}" >> "$GITHUB_OUTPUT"
+          echo "no_cache=${no_cache}"       >> "$GITHUB_OUTPUT"
+          echo "whl_platform=${whl_platform}" >> "$GITHUB_OUTPUT"
+          echo "push=${push}"               >> "$GITHUB_OUTPUT"
+          echo "image=${image}"             >> "$GITHUB_OUTPUT"
+          echo "version=${version}"         >> "$GITHUB_OUTPUT"
+
+          # Assemble build-args. BASE_IMAGE / BASE_IMAGE_TAG are only emitted when
+          # non-empty: passing an empty --build-arg would override the Dockerfile's
+          # ARG defaults with "" and break the FROM line.
+          {
+            echo "build_args<<EOF"
+            echo "WHL_PYTHON_VERSIONS=${python_versions}"
+            echo "WHL_PLATFORM=${whl_platform}"
+            echo "ARCH=${arch}"
+            echo "BUILD_TYPE=${build_type}"
+            echo "NPROC=${nproc}"
+            [ -n "${base_image}" ]     && echo "BASE_IMAGE=${base_image}"
+            [ -n "${base_image_tag}" ] && echo "BASE_IMAGE_TAG=${base_image_tag}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (only for cross-arch builds)
+        if: ${{ steps.cfg.outputs.arch != 'x86_64' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        # A docker-container builder is required to export/import the GHA layer cache.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          username: jacob1107
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+   
+
+      - name: Build (and optionally push) nixlbench image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ github.workspace }}/benchmark/nixlbench
+          file: ${{ github.workspace }}/benchmark/nixlbench/contrib/Dockerfile
+          platforms: linux/${{ steps.cfg.outputs.arch }}
+          # Named build-contexts — exactly what build.sh passes via --build-context:
+          #   nixl      -> repo root      (Dockerfile does COPY --from=nixl . /workspace/nixl)
+          #   nixlbench -> benchmark/nixlbench/ (Dockerfile does COPY --from=nixlbench . /workspace/nixlbench)
+          # Both contexts are derived from the same v1.3.1 checkout so versions stay in sync.
+          build-contexts: |
+            nixl=${{ github.workspace }}
+            nixlbench=${{ github.workspace }}/benchmark/nixlbench
+          build-args: ${{ steps.cfg.outputs.build_args }}
+          # push / load are mutually exclusive in build-push-action.
+          #   - Tag push or dispatch with push=true  -> push to GHCR
+          #   - Branch push / PR                      -> load into local docker (verification only)
+          push: true
+          load: ${{ steps.cfg.outputs.push != 'true' }}
+          # Layer cache: reuse the expensive grpc/AWS/Azure/libfabric layers across
+          # runs. mode=max caches intermediate stages too (needed because this
+          # Dockerfile is multi-stage). Scoped to nixlbench so it never collides
+          # with the nixl image workflow's cache.
+          cache-from: type=gha,scope=my-v1.3.1-mooncake
+          cache-to:   type=gha,mode=max,scope=nixlbench-my-v1.3.1-mooncake
+          no-cache: ${{ steps.cfg.outputs.no_cache == 'true' }}
+          provenance: false
+          sbom: false
+          tags: jacob1107/backend-vllm:nixl-latest-mooncake-1.3.1-0801
+
+      
