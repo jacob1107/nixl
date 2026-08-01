@@ -116,7 +116,7 @@ jobs:
           echo "=== Short SHA ==="
           git rev-parse --short HEAD
           echo "=== benchmark/nixlbench exists? ==="
-          ls -la benchmark/nixlbench/contrib/Dockerfile
+          ls -la benchmark/nixlbench/contrib/Dockerfile1
           ls -la benchmark/nixlbench/contrib/build.sh
 
       - name: Lowercase repository owner (GHCR path must be lowercase)
