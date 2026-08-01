@@ -209,7 +209,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ github.workspace }}/benchmark/nixlbench
-          file: ${{ github.workspace }}/benchmark/nixlbench/contrib/Dockerfile1
+          file: ${{ github.workspace }}/benchmark/nixlbench/contrib/Dockerfile
           platforms: linux/${{ steps.cfg.outputs.arch }}
           # Named build-contexts — exactly what build.sh passes via --build-context:
           #   nixl      -> repo root      (Dockerfile does COPY --from=nixl . /workspace/nixl)
