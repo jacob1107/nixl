@@ -209,7 +209,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ github.workspace }}/benchmark/nixlbench
-          file: ${{ github.workspace }}/benchmark/nixlbench/contrib/Dockerfile
+          file: ${{ github.workspace }}/benchmark/nixlbench/contrib/Dockerfile1
           platforms: linux/${{ steps.cfg.outputs.arch }}
           # Named build-contexts — exactly what build.sh passes via --build-context:
           #   nixl      -> repo root      (Dockerfile does COPY --from=nixl . /workspace/nixl)
@@ -233,6 +233,6 @@ jobs:
           no-cache: ${{ steps.cfg.outputs.no_cache == 'true' }}
           provenance: false
           sbom: false
-          tags: jacob1107/backend-vllm:nixl-latest-mooncake-1.3.1-0801
+          tags: jacob1107/backend-vllm:nixl-latest-mooncake-1.3.1-0801-nv
 
       
