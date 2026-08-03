@@ -270,7 +270,7 @@ RUN if [ "$BUILD_MOONCAKE" = "true" ]; then \
         git checkout $MOONCAKE_REF && \
         bash dependencies.sh && \
         mkdir -p build && cd build && \
-        cmake .. -DBUILD_SHARED_LIBS=ON  -DUSE_MNNVL=ON  -DUSE_INTRA_NVLINK=ON  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
+        cmake .. -DBUILD_SHARED_LIBS=ON  -DUSE_MNNVL=ON  -DUSE_INTRA_NVLINK=ON   -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined"   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
         make -j${NPROC:-$(nproc)} && \
         make install && \
         ldconfig; \
