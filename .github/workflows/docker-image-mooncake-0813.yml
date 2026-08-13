@@ -1,20 +1,16 @@
-# Standalone NIXLBench image build — fully independent of the nixl image workflow.
+# NIXL + Mooncake Transfer Engine image build.
 #
-# Why a dedicated workflow?
-#   The nixlbench Dockerfile (benchmark/nixlbench/contrib/Dockerfile) is far heavier
-#   than the nixl one: it compiles abseil, gRPC, libfabric, etcd-cpp-api, the AWS SDK,
-#   the Azure SDK and gusli from source. A cold build is hours; the single biggest
-#   optimization is reusing those layers across runs, so this workflow drives the build
-#   through `docker/build-push-action` with a GitHub Actions (BuildKit) layer cache.
+# This workflow builds contrib/Dokcerfile.mooncake, which extends the base NIXL
+# image with the Mooncake Transfer Engine so the NIXL MOONCAKE backend plugin is
+# built and installed. Unlike the nixlbench image, this Dockerfile copies the
+# source directly from the repo root (COPY . /workspace/nixl), so no named
+# build-contexts are needed — only the build-args.
 #
-#   The build-args and the `nixl` / `nixlbench` named build-contexts below mirror exactly
-#   what benchmark/nixlbench/contrib/build.sh passes, so the Dockerfile semantics are
-#   unchanged — only the driver (buildx) and caching differ.
-#
-# Memory: nixlbench uses BuildKit `--build-context` (COPY --from=nixl / --from=nixlbench),
-#   so it CANNOT use the legacy-builder `--memory` cap. Peak RAM is controlled by lowering
-#   NPROC (grpc + AWS SDK are the hogs). Default 4 fits a 16 GB runner.
-name: image-mooncake-0813
+# The build is heavy (abseil, gRPC, etcd-cpp-api, AWS SDK, Azure SDK, gusli,
+# Mooncake, UCX, libfabric all compiled from source), so the expensive layers are
+# reused across runs via a GitHub Actions (BuildKit) layer cache scoped to this
+# image.
+name: Build NIXL Mooncake Image-00000-0813
 
 on:
   workflow_dispatch:
@@ -24,9 +20,6 @@ on:
         type: choice
         default: release
         options: [release, debug]
-      python_versions:
-        description: "Python versions for the wheel stage (comma separated)"
-        default: "3.12"
       arch:
         description: "Target arch (aarch64 cross-builds via QEMU — very slow for this image)"
         type: choice
@@ -41,34 +34,44 @@ on:
       base_image_tag:
         description: "Base image tag. Empty = Dockerfile default."
         default: ""
+      build_mooncake:
+        description: "Build the Mooncake Transfer Engine (set false to skip and speed up rebuilds)"
+        type: choice
+        default: "true"
+        options: ["true", "false"]
+      mooncake_version:
+        description: "Mooncake release tag"
+        default: "v0.3.12"
       no_cache:
         description: "Ignore BuildKit cache (full rebuild)"
         type: boolean
         default: false
       push:
-        description: "Push the built image to GHCR"
+        description: "Push the built image to Docker Hub"
         type: boolean
         default: true
 
   push:
     branches: [my-v1.3.1-mooncake]
-    # Only when something the nixlbench image actually bakes in changes.
+    # Only when something the mooncake image actually bakes in changes.
     paths:
-      - "benchmark/nixlbench/**"
+      - "contrib/Dokcerfile.mooncake"
+      - "contrib/**"
       - "src/**"
       - "meson.build"
       - "meson.options"
       - "pyproject.toml"
-      - ".github/workflows/build-nixlbench.yml"
+      - ".github/workflows/docker-image-mooncake.yml"
 
   pull_request:
     paths:
-      - "benchmark/nixlbench/**"
+      - "contrib/Dokcerfile.mooncake"
+      - "contrib/**"
       - "src/**"
       - "meson.build"
       - "meson.options"
       - "pyproject.toml"
-      - ".github/workflows/build-nixlbench.yml"
+      - ".github/workflows/docker-image-mooncake.yml"
 
 env:
   # NGC base image (nvcr.io) pull auth. Optional for public nvcr.io/nvidia/* images;
@@ -83,10 +86,10 @@ permissions:
   packages: write # push image to ghcr.io
 
 jobs:
-  build-nixlbench:
-    name: Build nixlbench image
+  build-mooncake:
+    name: Build nixl-mooncake image
     runs-on: ubuntu-24.04
-    timeout-minutes: 240 # heavy: compiles grpc/AWS/Azure SDK from source
+    timeout-minutes: 360 # heavy: compiles grpc/AWS/Azure/Mooncake/UCX/libfabric from source
     steps:
       - name: Checkout
         # fetch-depth: 0 — the image version derives from git rev/tags.
@@ -94,24 +97,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Lowercase repository owner (GHCR path must be lowercase)
-        id: owner
-        run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
       - name: Resolve build configuration
         id: cfg
         run: |
           set -eu
           arch="${{ github.event.inputs.arch || 'x86_64' }}"
           build_type="${{ github.event.inputs.build_type || 'release' }}"
-          python_versions="${{ github.event.inputs.python_versions || '3.12' }}"
           nproc="${{ github.event.inputs.nproc || '4' }}"
           base_image="${{ github.event.inputs.base_image || '' }}"
           base_image_tag="${{ github.event.inputs.base_image_tag || '' }}"
+          build_mooncake="${{ github.event.inputs.build_mooncake || 'true' }}"
+          mooncake_version="${{ github.event.inputs.mooncake_version || 'v0.3.12' }}"
           no_cache="${{ github.event.inputs.no_cache || 'false' }}"
-
-          # Wheel platform tag mirrors build.sh: manylinux_2_39_<arch>.
-          whl_platform="manylinux_2_39_${arch}"
 
           # Push policy: push on manual dispatch (push=true) or version-tag push.
           # Branch pushes and PRs are build-only (load into docker for verification).
@@ -128,16 +125,16 @@ jobs:
           else
             version="dev-$(git rev-parse --short HEAD)"
           fi
-          image="ghcr.io/${{ steps.owner.outputs.name }}/nixlbench:${version}"
+          image="jacob1107/backend-vllm:nixl-mooncake-${version}"
 
           echo "arch=${arch}"               >> "$GITHUB_OUTPUT"
           echo "build_type=${build_type}"   >> "$GITHUB_OUTPUT"
-          echo "python_versions=${python_versions}" >> "$GITHUB_OUTPUT"
           echo "nproc=${nproc}"             >> "$GITHUB_OUTPUT"
           echo "base_image=${base_image}"   >> "$GITHUB_OUTPUT"
           echo "base_image_tag=${base_image_tag}" >> "$GITHUB_OUTPUT"
+          echo "build_mooncake=${build_mooncake}" >> "$GITHUB_OUTPUT"
+          echo "mooncake_version=${mooncake_version}" >> "$GITHUB_OUTPUT"
           echo "no_cache=${no_cache}"       >> "$GITHUB_OUTPUT"
-          echo "whl_platform=${whl_platform}" >> "$GITHUB_OUTPUT"
           echo "push=${push}"               >> "$GITHUB_OUTPUT"
           echo "image=${image}"             >> "$GITHUB_OUTPUT"
 
@@ -146,11 +143,11 @@ jobs:
           # ARG defaults with "" and break the FROM line.
           {
             echo "build_args<<EOF"
-            echo "WHL_PYTHON_VERSIONS=${python_versions}"
-            echo "WHL_PLATFORM=${whl_platform}"
             echo "ARCH=${arch}"
             echo "BUILD_TYPE=${build_type}"
             echo "NPROC=${nproc}"
+            echo "BUILD_MOONCAKE=${build_mooncake}"
+            echo "MOONCAKE_VERSION=${mooncake_version}"
             [ -n "${base_image}" ]     && echo "BASE_IMAGE=${base_image}"
             [ -n "${base_image_tag}" ] && echo "BASE_IMAGE_TAG=${base_image_tag}"
             echo "EOF"
@@ -164,22 +161,34 @@ jobs:
         # A docker-container builder is required to export/import the GHA layer cache.
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to NGC (nvcr.io)--jacob
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: jacob1107
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-
-
-      - name: Build (and push) nixlbench image
+      - name: Build (and push) nixl-mooncake image
         id: build
         uses: docker/build-push-action@v6
         with:
+          # The Dockerfile does COPY . /workspace/nixl, so the build context is the
+          # repo root and the file lives under contrib/.
           context: ${{ github.workspace }}
-          file: ${{ github.workspace }}/contrib/Dockerfile.mooncake
-         
-          push: true
-
-          tags: jacob1107/backend-vllm:nixl-latest-mooncake-1.3.1-0813
-      
+          file: ${{ github.workspace }}/contrib/Dokcerfile.mooncake
+          platforms: linux/${{ steps.cfg.outputs.arch }}
+          build-args: ${{ steps.cfg.outputs.build_args }}
+          # Push when configured; otherwise load the image into local docker so the
+          # run still proves the build succeeds (build-push-action forbids push+load
+          # together, so they are mutually exclusive).
+          push: ${{ steps.cfg.outputs.push == 'true' }}
+          load: ${{ steps.cfg.outputs.push != 'true' }}
+          # Layer cache: reuse the expensive grpc/AWS/Azure/Mooncake/UCX/libfabric
+          # layers across runs. mode=max caches intermediate stages too (needed
+          # because this Dockerfile effectively has long RUN stages). Scoped to
+          # nixl-mooncake so it never collides with the other image workflows.
+          cache-from: type=gha,scope=nixl-mooncake
+          cache-to: type=gha,mode=max,scope=nixl-mooncake
+          no-cache: ${{ steps.cfg.outputs.no_cache == 'true' }}
+          provenance: false
+          sbom: false
+          tags: ${{ steps.cfg.outputs.image }}
