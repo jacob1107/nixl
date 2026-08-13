@@ -14,7 +14,7 @@
 # Memory: nixlbench uses BuildKit `--build-context` (COPY --from=nixl / --from=nixlbench),
 #   so it CANNOT use the legacy-builder `--memory` cap. Peak RAM is controlled by lowering
 #   NPROC (grpc + AWS SDK are the hogs). Default 4 fits a 16 GB runner.
-name: Build NIXLBench Image-mooncake
+name: image-mooncake-0813
 
 on:
   workflow_dispatch:
