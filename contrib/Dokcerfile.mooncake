@@ -184,8 +184,8 @@ RUN if [ "$BUILD_MOONCAKE" = "true" ]; then \
         bash dependencies.sh -y && \
         mkdir build && cd build && \
         cmake .. -DBUILD_SHARED_LIBS=ON  -DUSE_MNNVL=ON  -DUSE_INTRA_NVLINK=ON   -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared   -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-shlib-undefined"   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
-        ninja -j${NPROC:-$(nproc)} && \
-        ninja install && \
+        make -j${NPROC:-$(nproc)} && \
+        make install && \
         ldconfig && \
         # Mooncake's dependencies.sh pulls libboost-mpi and openmpi, which conflict
         # with the MPI/UCX stack from the base image. Remove them after the build.
