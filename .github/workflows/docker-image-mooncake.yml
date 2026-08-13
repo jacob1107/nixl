@@ -10,7 +10,7 @@
 # Mooncake, UCX, libfabric all compiled from source), so the expensive layers are
 # reused across runs via a GitHub Actions (BuildKit) layer cache scoped to this
 # image.
-name: Build NIXL Mooncake Image
+name: Build NIXL Mooncake Image-00000
 
 on:
   workflow_dispatch:
