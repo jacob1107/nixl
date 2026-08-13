@@ -1,0 +1,194 @@
+# NIXL + Mooncake Transfer Engine image build.
+#
+# This workflow builds contrib/Dokcerfile.mooncake, which extends the base NIXL
+# image with the Mooncake Transfer Engine so the NIXL MOONCAKE backend plugin is
+# built and installed. Unlike the nixlbench image, this Dockerfile copies the
+# source directly from the repo root (COPY . /workspace/nixl), so no named
+# build-contexts are needed — only the build-args.
+#
+# The build is heavy (abseil, gRPC, etcd-cpp-api, AWS SDK, Azure SDK, gusli,
+# Mooncake, UCX, libfabric all compiled from source), so the expensive layers are
+# reused across runs via a GitHub Actions (BuildKit) layer cache scoped to this
+# image.
+name: Build NIXL Mooncake Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        type: choice
+        default: release
+        options: [release, debug]
+      arch:
+        description: "Target arch (aarch64 cross-builds via QEMU — very slow for this image)"
+        type: choice
+        default: x86_64
+        options: [x86_64, aarch64]
+      nproc:
+        description: "Parallel compile jobs (peak memory scales with this). Lower = less RAM."
+        default: "4"
+      base_image:
+        description: "Base image (nvcr.io/...). Empty = Dockerfile default (cuda-dl-base)."
+        default: ""
+      base_image_tag:
+        description: "Base image tag. Empty = Dockerfile default."
+        default: ""
+      build_mooncake:
+        description: "Build the Mooncake Transfer Engine (set false to skip and speed up rebuilds)"
+        type: choice
+        default: "true"
+        options: ["true", "false"]
+      mooncake_version:
+        description: "Mooncake release tag"
+        default: "v0.3.12"
+      no_cache:
+        description: "Ignore BuildKit cache (full rebuild)"
+        type: boolean
+        default: false
+      push:
+        description: "Push the built image to Docker Hub"
+        type: boolean
+        default: true
+
+  push:
+    branches: [my-v1.3.1-mooncake]
+    # Only when something the mooncake image actually bakes in changes.
+    paths:
+      - "contrib/Dokcerfile.mooncake"
+      - "contrib/**"
+      - "src/**"
+      - "meson.build"
+      - "meson.options"
+      - "pyproject.toml"
+      - ".github/workflows/docker-image-mooncake.yml"
+
+  pull_request:
+    paths:
+      - "contrib/Dokcerfile.mooncake"
+      - "contrib/**"
+      - "src/**"
+      - "meson.build"
+      - "meson.options"
+      - "pyproject.toml"
+      - ".github/workflows/docker-image-mooncake.yml"
+
+env:
+  # NGC base image (nvcr.io) pull auth. Optional for public nvcr.io/nvidia/* images;
+  # required for private/base images or to avoid anonymous rate limits.
+  # Set NGC_API_KEY in repo Settings -> Secrets -> Actions. nvcr.io login user is the
+  # literal "$oauthtoken".
+  NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+  NGC_USER: "$oauthtoken"
+
+permissions:
+  contents: read
+  packages: write # push image to ghcr.io
+
+jobs:
+  build-mooncake:
+    name: Build nixl-mooncake image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360 # heavy: compiles grpc/AWS/Azure/Mooncake/UCX/libfabric from source
+    steps:
+      - name: Checkout
+        # fetch-depth: 0 — the image version derives from git rev/tags.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve build configuration
+        id: cfg
+        run: |
+          set -eu
+          arch="${{ github.event.inputs.arch || 'x86_64' }}"
+          build_type="${{ github.event.inputs.build_type || 'release' }}"
+          nproc="${{ github.event.inputs.nproc || '4' }}"
+          base_image="${{ github.event.inputs.base_image || '' }}"
+          base_image_tag="${{ github.event.inputs.base_image_tag || '' }}"
+          build_mooncake="${{ github.event.inputs.build_mooncake || 'true' }}"
+          mooncake_version="${{ github.event.inputs.mooncake_version || 'v0.3.12' }}"
+          no_cache="${{ github.event.inputs.no_cache || 'false' }}"
+
+          # Push policy: push on manual dispatch (push=true) or version-tag push.
+          # Branch pushes and PRs are build-only (load into docker for verification).
+          push="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ github.event.inputs.push }}" = "true" ] && push="true"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            push="true"
+          fi
+
+          # Image tag: use the git tag on a tag push, else dev-<short sha>.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="dev-$(git rev-parse --short HEAD)"
+          fi
+          image="jacob1107/backend-vllm:nixl-mooncake-${version}"
+
+          echo "arch=${arch}"               >> "$GITHUB_OUTPUT"
+          echo "build_type=${build_type}"   >> "$GITHUB_OUTPUT"
+          echo "nproc=${nproc}"             >> "$GITHUB_OUTPUT"
+          echo "base_image=${base_image}"   >> "$GITHUB_OUTPUT"
+          echo "base_image_tag=${base_image_tag}" >> "$GITHUB_OUTPUT"
+          echo "build_mooncake=${build_mooncake}" >> "$GITHUB_OUTPUT"
+          echo "mooncake_version=${mooncake_version}" >> "$GITHUB_OUTPUT"
+          echo "no_cache=${no_cache}"       >> "$GITHUB_OUTPUT"
+          echo "push=${push}"               >> "$GITHUB_OUTPUT"
+          echo "image=${image}"             >> "$GITHUB_OUTPUT"
+
+          # Assemble build-args. BASE_IMAGE / BASE_IMAGE_TAG are only emitted when
+          # non-empty: passing an empty --build-arg would override the Dockerfile's
+          # ARG defaults with "" and break the FROM line.
+          {
+            echo "build_args<<EOF"
+            echo "ARCH=${arch}"
+            echo "BUILD_TYPE=${build_type}"
+            echo "NPROC=${nproc}"
+            echo "BUILD_MOONCAKE=${build_mooncake}"
+            echo "MOONCAKE_VERSION=${mooncake_version}"
+            [ -n "${base_image}" ]     && echo "BASE_IMAGE=${base_image}"
+            [ -n "${base_image_tag}" ] && echo "BASE_IMAGE_TAG=${base_image_tag}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (only for cross-arch builds)
+        if: ${{ steps.cfg.outputs.arch != 'x86_64' }}
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        # A docker-container builder is required to export/import the GHA layer cache.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: jacob1107
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build (and push) nixl-mooncake image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          # The Dockerfile does COPY . /workspace/nixl, so the build context is the
+          # repo root and the file lives under contrib/.
+          context: ${{ github.workspace }}
+          file: ${{ github.workspace }}/contrib/Dokcerfile.mooncake
+          platforms: linux/${{ steps.cfg.outputs.arch }}
+          build-args: ${{ steps.cfg.outputs.build_args }}
+          # Push when configured; otherwise load the image into local docker so the
+          # run still proves the build succeeds (build-push-action forbids push+load
+          # together, so they are mutually exclusive).
+          push: ${{ steps.cfg.outputs.push == 'true' }}
+          load: ${{ steps.cfg.outputs.push != 'true' }}
+          # Layer cache: reuse the expensive grpc/AWS/Azure/Mooncake/UCX/libfabric
+          # layers across runs. mode=max caches intermediate stages too (needed
+          # because this Dockerfile effectively has long RUN stages). Scoped to
+          # nixl-mooncake so it never collides with the other image workflows.
+          cache-from: type=gha,scope=nixl-mooncake
+          cache-to: type=gha,mode=max,scope=nixl-mooncake
+          no-cache: ${{ steps.cfg.outputs.no_cache == 'true' }}
+          provenance: false
+          sbom: false
+          tags: ${{ steps.cfg.outputs.image }}
