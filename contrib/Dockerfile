@@ -15,27 +15,15 @@
 
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 ARG BASE_IMAGE_TAG="25.10-cuda13.0-devel-ubuntu24.04"
-ARG OS
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
-# Set default OS if not provided
-ARG OS=${OS:-ubuntu24}
 ARG ARCH="x86_64"
 ARG DEFAULT_PYTHON_VERSION="3.12"
-ARG UCX_REPO="https://github.com/openucx/ucx.git"
-ARG UCX_REF="v1.23.x"
-ARG UCX_SONAME_SUFFIX=""
 ARG RDMA_CORE_PREFIX="/usr"
-ARG UCX_PREFIX="/usr"
-ARG UCX_PLUGIN_DIR="$UCX_PREFIX/lib/ucx"
-ARG DOCA_PREFIX="/opt/mellanox/doca"
 ARG NIXL_PREFIX="/usr/local/nixl"
 ARG NIXL_PLUGIN_DIR="$NIXL_PREFIX/lib/$ARCH-linux-gnu/plugins"
 ARG NPROC
-ARG WHL_DEFAULT_PYTHON_VERSIONS="3.12"
-ARG LIBFABRIC_VERSION="v1.21.0"
-ARG LIBFABRIC_INSTALL_PATH="/usr/local"
 ARG BUILD_TYPE="release"
 ARG ABSL_TAG="lts_2025_08_14"
 ARG GRPC_TAG="v1.73.0"
@@ -64,43 +52,20 @@ RUN apt-get update -y && \
     cmake \
     libgflags-dev \
     libprotobuf-dev \
-    libaio-dev \
     libcpprest-dev \
     etcd-server \
     etcd-client \
-    autotools-dev \
-    automake \
-    libtool \
     libz-dev \
-    flex \
     libgtest-dev \
     build-essential \
     python3.12-dev \
     clang \
-    hwloc \
-    libhwloc-dev \
     pkg-config \
-    # aws-sdk-cpp dependencies
-    libcurl4-openssl-dev libssl-dev uuid-dev zlib1g-dev \
-    # azure-sdk-for-cpp dependencies
-    libxml2-dev
+    # gRPC SSL provider
+    libssl-dev zlib1g-dev
 
-# Add DOCA repo + upgrade always so the RDMA reinstall below resolves MLNX/DOCA versions.
-# Skip only the DOCA SDK install when the base image already ships it.
-RUN ARCH_SUFFIX=$(if [ "${ARCH}" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) && \
-    MELLANOX_OS="$(. /etc/lsb-release; echo ${DISTRIB_ID}${DISTRIB_RELEASE} | tr A-Z a-z | tr -d .)" && \
-    wget --tries=3 --waitretry=5 --no-verbose https://www.mellanox.com/downloads/DOCA/DOCA_v3.3.0/host/doca-host_3.3.0-088000-26.01-${MELLANOX_OS}_${ARCH_SUFFIX}.deb -O doca-host.deb && \
-    dpkg -i doca-host.deb && \
-    apt-get update && \
-    apt-get upgrade -y && \
-    if dpkg -s doca-sdk-gpunetio >/dev/null 2>&1; then \
-        echo "DOCA SDK already installed in base image, skipping SDK install"; \
-    else \
-        apt-get install -y --no-install-recommends doca-sdk-gpunetio libdoca-sdk-gpunetio-dev libdoca-sdk-verbs-dev libdoca-sdk-telemetry-exporter-dev collectx-clxapidev; \
-    fi
-
-# Reinstall RDMA build deps (libfabric --enable-efa needs libibverbs-dev), required even when
-# DOCA is from the base image. --reinstall because apt skips equal versions.
+# Reinstall RDMA build deps (libibverbs for the UCCL verbs transport).
+# --reinstall because apt skips equal versions.
 RUN DEBIAN_FRONTEND=noninteractive apt-get -y install \
     --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
     libnuma-dev librdmacm-dev ibverbs-providers
@@ -111,7 +76,6 @@ WORKDIR /workspace
 # File modification timestamp check in CMake uses 1 second resolution.
 # This causes problems for fast builds that install, patch then reinstall the same file, as the final install step
 # may be incorrectly skipped.
-# Seen in CI as flaky ASAN failure due to inconsistent Azure SDK headers causing memory corruption.
 ENV CMAKE_INSTALL_ALWAYS=1
 
 # Build Abseil from source (required for absl/log).
@@ -162,102 +126,7 @@ RUN git clone --depth 1 https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git && 
     cmake .. -DBUILD_ETCD_CORE_ONLY=ON -DCMAKE_BUILD_TYPE=Release -DETCD_CMAKE_CXX_STANDARD=20 -DCMAKE_CXX_STANDARD=20 -DCMAKE_PREFIX_PATH=/usr/local && \
     make -j${NPROC:-$(nproc)} && make install
 
-RUN git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/aws/aws-sdk-cpp.git --branch 1.11.760 && \
-    mkdir aws_sdk_build && cd aws_sdk_build && \
-    cmake ../aws-sdk-cpp/ -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;s3-crt" -DENABLE_TESTING=OFF -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_CXX_STANDARD=20 && \
-    make -j${NPROC:-$(nproc)} && make install
-
-RUN git clone https://github.com/nvidia/gusli.git && \
-     cd gusli && \
-     make all BUILD_RELEASE=1 BUILD_FOR_UNITEST=0 VERBOSE=1 ALLOW_USE_URING=1 CXX="g++ -std=c++20" && \
-     cd ..
-
-RUN git clone --depth 1 https://github.com/Azure/azure-sdk-for-cpp.git --branch azure-storage-blobs_12.15.0 && \
-    cd azure-sdk-for-cpp/ && \
-    mkdir build && cd build && \
-    AZURE_SDK_DISABLE_AUTO_VCPKG=1 cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=/usr/local -DDISABLE_AMQP=ON -DDISABLE_AZURE_CORE_OPENTELEMETRY=ON -DCMAKE_CXX_STANDARD=20 && \
-    cmake --build . --parallel ${NPROC:-$(nproc)} --target azure-storage-blobs azure-identity && \
-    cmake --install sdk/core && \
-    cmake --install sdk/storage/azure-storage-common && \
-    cmake --install sdk/storage/azure-storage-blobs && \
-    cmake --install sdk/identity
-
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-RUN rm -rf /usr/lib/ucx
-RUN rm -rf /opt/hpcx/ucx
-
-RUN cd /usr/local/src && \
-     git clone "$UCX_REPO" ucx && \
-     cd ucx && \
-     echo "=== Using UCX_REF=$UCX_REF ===" && \
-     git checkout $UCX_REF && \
-        EXPERIMENTAL_API_PARAM="" && \
-     ./autogen.sh && \
-     if [ -n "$UCX_SONAME_SUFFIX" ]; then \
-         if ./configure --help | grep -q -- "--with-soname-suffix"; then \
-             UCX_SONAME_PARAM="--with-soname-suffix=$UCX_SONAME_SUFFIX"; \
-         else \
-             echo "UCX_REF=$UCX_REF does not support --with-soname-suffix" >&2; \
-             exit 1; \
-         fi; \
-         if ./configure --help | grep -q -- "--enable-module-deepbind"; then \
-             UCX_MODULE_DEEPBIND_PARAM="--enable-module-deepbind"; \
-         else \
-             echo "UCX_REF=$UCX_REF does not support --enable-module-deepbind" >&2; \
-             exit 1; \
-         fi; \
-     else \
-         UCX_SONAME_PARAM=""; \
-         UCX_MODULE_DEEPBIND_PARAM=""; \
-     fi && \
-     ./contrib/configure-release-mt  \
-         --prefix=$UCX_PREFIX        \
-         --enable-shared             \
-         --disable-static            \
-         --disable-doxygen-doc       \
-         --enable-optimizations      \
-         --without-avx               \
-         --enable-cma                \
-         --enable-devel-headers      \
-         $EXPERIMENTAL_API_PARAM      \
-         --with-cuda=/usr/local/cuda \
-         --with-verbs                \
-         --with-dm                   \
-         --without-gdrcopy           \
-         --with-efa                  \
-         $UCX_SONAME_PARAM           \
-         $UCX_MODULE_DEEPBIND_PARAM && \
-     make -j${NPROC:-$(nproc)} &&                \
-     make -j${NPROC:-$(nproc)} install-strip &&  \
-     ldconfig
-
-RUN cd /tmp && \
-     git clone --depth 1 https://github.com/google/gtest-parallel.git && \
-     mkdir -p /usr/local/bin && \
-     cp gtest-parallel/gtest-parallel gtest-parallel/gtest_parallel.py /usr/local/bin/
-ENV PATH=/usr/local/bin:$PATH
-
-# Build libfabric from source
-RUN wget --tries=3 --waitretry=5 --timeout=30 --read-timeout=60 \
-    "https://github.com/ofiwg/libfabric/releases/download/${LIBFABRIC_VERSION}/libfabric-${LIBFABRIC_VERSION#v}.tar.bz2" -O libfabric.tar.bz2 && \
-    tar xjf libfabric.tar.bz2 && rm libfabric.tar.bz2 && \
-    cd libfabric-* && \
-    ./autogen.sh && \
-    ./configure --prefix="${LIBFABRIC_INSTALL_PATH}" \
-                --disable-verbs \
-                --disable-psm3 \
-                --disable-opx \
-                --disable-usnic \
-                --disable-rstream \
-                --enable-efa \
-                --with-cuda=/usr/local/cuda \
-                --enable-cuda-dlopen \
-                --with-gdrcopy \
-                --enable-gdrcopy-dlopen && \
-    make -j${NPROC:-$(nproc)} && \
-    make install && \
-    ldconfig
 
 # Keep uv's cache in /workspace, not /root (some hosts mount $HOME over /root).
 ENV UV_CACHE_DIR=/workspace/.cache/uv
@@ -287,66 +156,14 @@ RUN uv pip install --system --upgrade 'setuptools>=80.9.0'
 WORKDIR /workspace/nixl
 COPY . /workspace/nixl
 
-ENV LD_LIBRARY_PATH=/usr/local/lib:$LIBFABRIC_INSTALL_PATH/lib:$RDMA_CORE_PREFIX/lib:$LD_LIBRARY_PATH
-
-# Opt-in: build the internal ucx-spcx-plugin against the UCX built above and
-# install it into the UCX plugins dir, where UCX loads it like any other module.
-# The plugin source is cloned into the build context (ucx-spcx-plugin-src/) by
-# build-container.sh --build-ucx-spcx-plugin, so this must come after the
-# `COPY . /workspace/nixl` above.
-# FlexIO SDK + dpacc (build-time dependencies of the plugin's DPA transport) come
-# from the doca-host repo added above; libflexio is compile-against only — at
-# runtime it comes from the target machine's DOCA/FlexIO installation.
-# ac_cv_prog_cc_c23=no: on toolchains defaulting to C23, AC_PROG_CC resolves CC to
-# "gcc -std=gnu23". The plugin's src/gdp/Makefile.am passes the compiler through
-# unsplit as -hostcc=$(CC), so dpacc receives a bare -std=gnu23 and rejects it.
-# Drop this once the plugin splits the compiler from its flags.
-ARG BUILD_UCX_SPCX_PLUGIN=false
-RUN if [ "$BUILD_UCX_SPCX_PLUGIN" = "true" ]; then \
-        apt-get update -y && \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            flexio-sdk dpacc && \
-        ldconfig && \
-        cd ucx-spcx-plugin-src && \
-        export ACLOCAL_PATH="/usr/share/aclocal${ACLOCAL_PATH:+:$ACLOCAL_PATH}" && \
-        export ac_cv_prog_cc_c23=no && \
-        ./autogen.sh /usr/local/src/ucx && \
-        ./configure --prefix=$UCX_PREFIX --libdir=$UCX_PREFIX/lib \
-            --enable-shared --disable-static \
-            --with-ucx-src=/usr/local/src/ucx \
-            --with-ucx-build=/usr/local/src/ucx \
-            --with-cuda=/usr/local/cuda \
-            --with-flexio=/opt/mellanox/flexio \
-            --with-dpacc=$DOCA_PREFIX/tools/dpacc \
-            LDFLAGS="-L$UCX_PLUGIN_DIR -L$UCX_PREFIX/lib" && \
-        make -j${NPROC:-$(nproc)} && \
-        make install && \
-        ldconfig && \
-        cd /workspace/nixl && rm -rf ucx-spcx-plugin-src; \
-    fi
-
-# Opt-in: place the pre-staged DDN Infinia libs (from infinia-libs/ in the build
-# context, populated by build-container.sh --build-infinia) into /opt/ddn/red, the
-# infinia_path meson default, so meson auto-detects red_client and builds
-# libplugin_INFINIA.so. No registry pull here: the libs arrive via the COPY above.
-# uuid/uuid.h, included by the DDN red_client headers, comes from the uuid-dev
-# installed with the aws-sdk-cpp deps above.
-ARG BUILD_INFINIA=false
-RUN if [ "$BUILD_INFINIA" = "true" ]; then \
-        if [ -z "$(ls -A /workspace/nixl/infinia-libs 2>/dev/null)" ]; then \
-            echo "ERROR: BUILD_INFINIA=true but /workspace/nixl/infinia-libs is empty (staging failed?)" >&2; \
-            exit 1; \
-        fi; \
-        mkdir -p /opt/ddn/red && \
-        cp -a /workspace/nixl/infinia-libs/. /opt/ddn/red/; \
-    fi
+ENV LD_LIBRARY_PATH=/usr/local/lib:$RDMA_CORE_PREFIX/lib:$LD_LIBRARY_PATH
 
 # Install pybind11 via apt
 RUN apt-get update && apt-get install -y --no-install-recommends pybind11-dev
 
-# Set PKG_CONFIG_PATH for NIXL EP dependencies (rdma-core, UCX, DOCA)
+# Set PKG_CONFIG_PATH for NIXL dependencies (rdma-core)
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib/$ARCH-linux-gnu/pkgconfig
-ENV PKG_CONFIG_PATH=$RDMA_CORE_PREFIX/lib/$ARCH-linux-gnu/pkgconfig:$UCX_PREFIX/lib/pkgconfig:$DOCA_PREFIX/lib/$ARCH-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
+ENV PKG_CONFIG_PATH=$RDMA_CORE_PREFIX/lib/$ARCH-linux-gnu/pkgconfig:$PKG_CONFIG_PATH
 
 ENV NIXL_PREFIX=$NIXL_PREFIX
 RUN rm -rf build && \
