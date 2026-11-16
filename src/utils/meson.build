@@ -17,8 +17,3 @@ subdir('common')
 subdir('serdes')
 subdir('stream')
 subdir('file')
-subdir('object')
-
-if enabled_plugins.get('LIBFABRIC') and libfabric_dep.found()
-    subdir('libfabric')
-endif

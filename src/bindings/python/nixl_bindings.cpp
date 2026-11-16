@@ -210,14 +210,11 @@ PYBIND11_MODULE(_bindings, m) {
 
     m.attr("DEFAULT_COMM_PORT") = default_comm_port;
 
-    // Whether NIXL was built against a UCX with the GPU device API, which the
-    // prepMemView/releaseMemView path requires. Mirrors the meson
-    // HAVE_UCX_GPU_DEVICE_API gate so callers (and tests) can probe support.
-#ifdef HAVE_UCX_GPU_DEVICE_API
-    m.attr("HAVE_UCX_GPU_DEVICE_API") = true;
-#else
+    // Whether NIXL was built with the UCX GPU device API, which the
+    // prepMemView/releaseMemView path required. The UCX plugin (and with it the
+    // device API) was removed in this tree; kept as a constant so callers (and
+    // tests) can still probe support.
     m.attr("HAVE_UCX_GPU_DEVICE_API") = false;
-#endif
 
     // cast types
     py::enum_<nixl_thread_sync_t>(m, "nixl_thread_sync_t")

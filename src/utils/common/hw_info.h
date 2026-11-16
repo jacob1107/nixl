@@ -24,7 +24,7 @@ namespace nixl {
  * @brief Lazily-detected, process-wide snapshot of the host's GPU and RDMA NIC inventory.
  *
  * Populated once on first call to @ref instance() by scanning PCI devices under
- * @c /sys/bus/pci/devices and matching vendor/class IDs. No CUDA, ROCm, or libibverbs
+ * @c /sys/bus/pci/devices and matching vendor/class IDs. No CUDA or libibverbs
  * runtime is required. All fields are zero if the sysfs scan fails or no matching
  * devices are present.
  */

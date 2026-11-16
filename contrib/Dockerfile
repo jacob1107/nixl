@@ -185,22 +185,6 @@ RUN git clone --depth 1 https://github.com/Azure/azure-sdk-for-cpp.git --branch 
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.86.0 \
-    RUSTARCH=${ARCH}-unknown-linux-gnu
-
-# Download rustup-init and its checksum for the target architecture
-RUN wget --tries=3 --waitretry=5 \
-    "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" \
-    "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init.sha256" && \
-    sha256sum -c rustup-init.sha256 && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init* && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
 RUN rm -rf /usr/lib/ucx
 RUN rm -rf /opt/hpcx/ucx
 
@@ -368,13 +352,7 @@ ENV PKG_CONFIG_PATH=$RDMA_CORE_PREFIX/lib/$ARCH-linux-gnu/pkgconfig:$UCX_PREFIX/
 ENV NIXL_PREFIX=$NIXL_PREFIX
 RUN rm -rf build && \
     mkdir build && \
-    if [ "$BUILD_NIXL_EP" = "true" ]; then \
-        echo "=== BUILD_NIXL_EP=true: Building NIXL with NIXL EP support ===" && \
-        NIXL_EP_FLAG="-Dbuild_nixl_ep=true -Dbuild_examples=true"; \
-    else \
-        NIXL_EP_FLAG=""; \
-    fi && \
-    meson setup -Ducx_path=$UCX_PREFIX -Dlibfabric_path=$LIBFABRIC_INSTALL_PATH $NIXL_EP_FLAG build/ --prefix=$NIXL_PREFIX --buildtype=$BUILD_TYPE && \
+    meson setup build/ --prefix=$NIXL_PREFIX --buildtype=$BUILD_TYPE && \
     cd build && \
     ninja -j${NPROC:-$(nproc)} && \
     ninja install
@@ -383,11 +361,7 @@ RUN echo "$NIXL_PREFIX/lib/$ARCH-linux-gnu" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
-# Set environment variables for NIXL EP
 ENV NIXL_PLUGIN_DIR=$NIXL_PLUGIN_DIR
-ENV PYTHONPATH=/workspace/nixl/build/examples/device/ep
-
-RUN cd src/bindings/rust && cargo build --release --locked
 
 # Install the python bindings from source, built against the container's own
 # torch - works on any base, no dependency on public torch wheels.

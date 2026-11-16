@@ -8,7 +8,6 @@ The ETCD runtime provides distributed coordination and communication using etcd 
 
 - **C++ Runtime** (`etcd_rt.cpp/h`): Core ETCD-based communication primitives
 - **Python Bindings** (`python_bindings.cpp`): pybind11 bindings to expose C++ functions to Python
-- **Python Runtime** (`../../../kvbench/runtime/etcd_rt.py`): High-level Python API that implements the `_RTUtils` interface
 
 ## Features
 
@@ -47,35 +46,16 @@ python setup.py build_ext --inplace
 
 ## Usage
 
-The Python runtime provides ETCD-based distributed coordination:
+The Python bindings expose the C++ ETCD-based runtime directly as the
+`etcd_runtime` extension module (the higher-level `_EtcdDistUtils` Python
+runtime previously shipped in `benchmark/kvbench/runtime/`, which was removed
+from this tree):
 
-### Option 1: Direct instantiation
 ```python
-from nixl.benchmark.kvbench.runtime.etcd_rt import _EtcdDistUtils
+import etcd_runtime
 
-# Create runtime instance using ETCD
-runtime = _EtcdDistUtils(etcd_endpoints="http://localhost:2379", size=4)
-
-# Use the distributed runtime API
-rank = runtime.get_rank()
-world_size = runtime.get_world_size()
-
-# Collective operations
-data = runtime.allgather_obj({"rank": rank, "data": "hello"})
-runtime.barrier()
-```
-
-### Option 2: Using the global instance (configured via environment variables)
-```python
-from nixl.benchmark.kvbench.runtime import dist_rt
-
-# Runtime is automatically configured from ETCD_ENDPOINTS and WORLD_SIZE env vars
-rank = dist_rt.get_rank()
-world_size = dist_rt.get_world_size()
-
-# Collective operations
-data = dist_rt.allgather_obj({"rank": rank, "data": "hello"})
-dist_rt.barrier()
+# Use the pybind11-exposed C++ runtime API for rank management,
+# barriers, and collective operations.
 ```
 
 ## Configuration
@@ -88,8 +68,6 @@ Environment variables:
 
 ```
 Python Application
-       ↓
-_EtcdDistUtils (Python)
        ↓
 etcd_runtime (pybind11)
        ↓

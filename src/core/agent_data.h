@@ -45,7 +45,6 @@ class nixlAgentData final : public nixlMetadataContext {
         // what decides the effective sync mode.
         nixlMDManager md_;
         nixlLock        lock;
-        std::atomic<bool> efaWarningChecked = false;
 
         // some handle that can be used to instantiate an object from the lib
         std::map<std::string, void*> backendLibs;
@@ -99,9 +98,6 @@ class nixlAgentData final : public nixlMetadataContext {
         getBackends(const nixl_opt_args_t *opt_args,
                     const nixlMemSection &section,
                     nixl_mem_t mem_type);
-        void
-        warnAboutEfaHardwareMismatch();
-
         template<class dlist_t>
         nixl_status_t
         prepXferDlist(const std::string &agent_name,

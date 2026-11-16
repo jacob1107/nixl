@@ -36,8 +36,6 @@ endif
 
 if cuda_available
   utils_deps += [cuda_dep]
-elif rocm_available
-  utils_deps += [rocm_dep]
 endif
 
 utils_lib = static_library('utils',

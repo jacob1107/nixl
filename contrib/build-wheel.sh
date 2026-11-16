@@ -254,12 +254,6 @@ build_wheel() {
         --out-dir "$OUT_DIR"
         --python "$VENV_PATH/bin/python"
     )
-    if [ "$BUILD_NIXL_EP" = "true" ]; then
-        BUILD_ARGS+=(
-            -Csetup-args=-Dbuild_nixl_ep=true
-            -Csetup-args=-Dbuild_examples=true
-        )
-    fi
     uv build "${BUILD_ARGS[@]}"
 
     deactivate

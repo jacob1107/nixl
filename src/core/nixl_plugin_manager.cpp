@@ -20,7 +20,6 @@
 #include "common/configuration.h"
 #include "common/nixl_log.h"
 #include <dlfcn.h>
-#include <exception>
 #include <filesystem>
 #include <dirent.h>
 #include <unistd.h>  // For access() and F_OK
@@ -32,8 +31,6 @@ const std::string backendPluginPrefix = "libplugin_";
 const std::string telemetryPluginPrefix = "libtelemetry_exporter_";
 const std::string tracePluginPrefix = "libtrace_backend_";
 const std::string kPluginSuffix = ".so";
-const std::string kUcxPluginName = "UCX";
-const std::string kUcxDeepBindVar = "NIXL_UCX_DEEPBIND";
 
 // pluginHandle implementation
 nixlBackendPluginHandle::nixlBackendPluginHandle(void *handle, nixlBackendPlugin *plugin)
@@ -310,25 +307,6 @@ loadPluginList(const std::string &filename) {
     return plugins;
 }
 
-namespace {
-bool
-shouldDeepBindPlugin(const std::string &plugin_name) {
-    if (plugin_name != kUcxPluginName) {
-        return false;
-    }
-
-    try {
-        /* TODO: check if RTLD_DEEPBIND is needed at all for UCX/NIXL */
-        return nixl::config::getValueDefaulted<bool>(kUcxDeepBindVar, false);
-    }
-    catch (const std::exception &e) {
-        NIXL_WARN << "Invalid " << kUcxDeepBindVar
-                  << " value, enabling RTLD_DEEPBIND: " << e.what();
-        return true;
-    }
-}
-} // namespace
-
 std::shared_ptr<const nixlPluginHandle>
 nixlPluginManager::loadPluginFromPath(const std::string &plugin_path,
                                       nixlPluginLoaderFunc loader,
@@ -499,7 +477,7 @@ nixlPluginManager::loadBackendPluginImpl(const std::string &plugin_name) const {
         const std::string &plugin_path = path_it->second;
         if (std::filesystem::exists(plugin_path)) {
             auto plugin_handle =
-                loadPluginFromPath(plugin_path, backendLoader, shouldDeepBindPlugin(plugin_name));
+                loadPluginFromPath(plugin_path, backendLoader, false);
             if (plugin_handle) {
                 return std::dynamic_pointer_cast<const nixlBackendPluginHandle>(plugin_handle);
             }
@@ -519,7 +497,7 @@ nixlPluginManager::loadBackendPluginImpl(const std::string &plugin_name) const {
         }
 
         auto plugin_handle =
-            loadPluginFromPath(plugin_path, backendLoader, shouldDeepBindPlugin(plugin_name));
+            loadPluginFromPath(plugin_path, backendLoader, false);
         if (plugin_handle) {
             return std::dynamic_pointer_cast<const nixlBackendPluginHandle>(plugin_handle);
         }
@@ -818,48 +796,6 @@ nixlPluginManager::getTelemetryStaticPlugins() {
     register##plugin_type##StaticPlugin(#name, createStatic##name##Plugin);
 
 void nixlPluginManager::registerBuiltinPlugins() {
-#ifdef STATIC_PLUGIN_LIBFABRIC
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, LIBFABRIC)
-#endif
-
-#ifdef STATIC_PLUGIN_UCX
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, UCX)
-#endif
-
-#ifdef STATIC_PLUGIN_GDS
-#ifndef DISABLE_GDS_BACKEND
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, GDS)
-#endif
-#endif
-
-#ifdef STATIC_PLUGIN_GDS_MT
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, GDS_MT)
-#endif
-
-#ifdef STATIC_PLUGIN_POSIX
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, POSIX)
-#endif
-
-#ifdef STATIC_PLUGIN_GPUNETIO
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, GPUNETIO)
-#endif
-
-#ifdef STATIC_PLUGIN_OBJ
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, OBJ)
-#endif
-
-#ifdef STATIC_PLUGIN_MOONCAKE
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, MOONCAKE)
-#endif
-
-#ifdef STATIC_PLUGIN_HF3FS
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, HF3FS)
-#endif
-
-#ifdef STATIC_PLUGIN_INFINIA
-    NIXL_REGISTER_STATIC_PLUGIN(Backend, INFINIA)
-#endif
-
     NIXL_REGISTER_STATIC_PLUGIN(Telemetry, BUFFER)
     NIXL_REGISTER_STATIC_PLUGIN(Telemetry, NOP)
 }

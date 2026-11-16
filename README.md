@@ -12,21 +12,7 @@ NVIDIA Inference Xfer Library (NIXL) is targeted for accelerating point to point
 
 ## Documentation and Resources
 
-* [NIXL overview](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md) - Core concepts/architecture overview (`docs/nixl.md`)
-
-* [Python API](https://github.com/ai-dynamo/nixl/blob/main/docs/python_api.md) - Python API usage and examples (`docs/python_api.md`)
-
-* [Backend guide](https://github.com/ai-dynamo/nixl/blob/main/docs/BackendGuide.md) - Backend/plugin development guide (`docs/BackendGuide.md`)
-
-* [Telemetry](https://github.com/ai-dynamo/nixl/blob/main/docs/telemetry.md) - Observability and telemetry details (`docs/telemetry.md`)
-
-* [Doxygen guide](https://github.com/ai-dynamo/nixl/blob/main/docs/doxygen/nixl_doxygen.md) - API/class diagrams overview (`docs/doxygen/nixl_doxygen.md`)
-
-* [Doxygen images](https://github.com/ai-dynamo/nixl/tree/main/docs/doxygen) - Diagram assets (`docs/doxygen/`)
-
 * [NIXLBench docs](https://github.com/ai-dynamo/nixl/blob/main/benchmark/nixlbench/README.md) - Benchmark usage guide (`benchmark/nixlbench/README.md`)
-
-* [KVBench docs](https://github.com/ai-dynamo/nixl/tree/main/benchmark/kvbench/docs) - KVBench workflows and tutorials (`benchmark/kvbench/docs/`)
 
 ## Supported Platforms
 NIXL is supported on a Linux environment only. It is tested on Ubuntu (22.04/24.04) and Fedora. macOS and Windows are not currently supported; use a Linux host or container/VM.
@@ -34,7 +20,7 @@ NIXL is supported on a Linux environment only. It is tested on Ubuntu (22.04/24.
 ## Pre-build Distributions
 ### PyPI Wheel
 
-The nixl python API and libraries, including UCX, are available directly through PyPI.
+The nixl python API and libraries are available directly through PyPI.
 For example, if you have a GPU running on a Linux host, container, or VM, you can do the following install:
 
 Install with:
@@ -61,33 +47,18 @@ NIXL requires a C++20 compatible compiler (GCC >= 11 or Clang >= 14).
 
 `$ pip3 install meson ninja pybind11 tomlkit`
 
-### UCX
+### UCCL (required)
 
-NIXL was tested with UCX version 1.23.x.
-
-[GDRCopy](https://github.com/NVIDIA/gdrcopy) is available on Github and is necessary for maximum performance, but UCX and NIXL will work without it.
+This tree ships the UCCL backend plugin only. The plugin is built when the
+`uccl_p2p` library is discoverable (e.g. installed under `/usr/local/lib`):
 
 ```
-$ git clone https://github.com/openucx/ucx.git
-$ cd ucx
-$ git checkout v1.23.x
-$ ./autogen.sh
-$ ./contrib/configure-release-mt       \
-    --enable-shared                    \
-    --disable-static                   \
-    --disable-doxygen-doc              \
-    --enable-optimizations             \
-    --without-avx                      \
-    --enable-cma                       \
-    --enable-devel-headers             \
-    --with-cuda=<cuda install>         \
-    --with-verbs                       \
-    --with-dm                          \
-    --with-gdrcopy=<gdrcopy install>
-$ make -j
-$ make -j install-strip
-$ ldconfig
+$ ls /usr/local/lib/libuccl_p2p* /usr/local/lib/librdma_plugin*
 ```
+
+If UCCL is installed elsewhere, make the path visible to the compiler
+(`LIBRARY_PATH` / `LD_LIBRARY_PATH`), or request an explicit failure with
+`-Denable_plugins=UCCL` when it cannot be found.
 
 ### ETCD (Optional)
 NIXL can use ETCD for metadata distribution and coordination between nodes in distributed environments. To use ETCD with NIXL:
@@ -112,13 +83,12 @@ $ cmake ..
 $ make -j$(nproc) && make install
 ```
 
-### Additional plugins
+### Plugins
 
-Some plugins may have additional build requirements, see them here:
-
-- [Mooncake](src/plugins/mooncake/README.md)
-- [POSIX](src/plugins/posix/README.md)
-- [GDS](src/plugins/cuda_gds/README.md)
+This tree builds a single backend plugin: [UCCL](src/plugins/uccl/README.md).
+All other upstream plugins (UCX, POSIX, OBJ, GDS, GDS_MT, GPUNETIO, Mooncake,
+HF3FS, GUSLI, Azure Blob, INFINIA, Libfabric, telemetry exporters and the NVTX
+tracing backend) were removed in the v1.5.2-vacc lineage.
 
 ## Getting started
 ### Build & install
@@ -149,67 +119,25 @@ $ meson setup <name_of_build_dir> --buildtype=debug
 ```bash
 # Example with custom options
 $ meson setup <name_of_build_dir> \
-    -Dbuild_docs=true \           # Build Doxygen documentation
-    -Ducx_path=/path/to/ucx \     # Custom UCX installation path
-    -Dinstall_headers=true \      # Install development headers
-    -Ddisable_gds_backend=false   # Enable GDS backend
+    -Dinstall_headers=true        # Install development headers
 ```
 
 Common build options:
-- `build_docs`: Build Doxygen documentation (default: false)
-- `ucx_path`: Path to UCX installation (default: system path)
 - `install_headers`: Install development headers (default: true)
-- `disable_gds_backend`: Disable GDS backend (default: false)
 - `cudapath_inc`, `cudapath_lib`: Custom CUDA paths
 - `static_plugins`: Comma-separated list of plugins to build statically
-- `enable_plugins`: Comma-separated list of plugins to build (e.g. `-Denable_plugins=UCX,POSIX`). Cannot be used with `disable_plugins`.
-- `disable_plugins`: Comma-separated list of plugins to exclude (e.g. `-Ddisable_plugins=GDS`). Cannot be used with `enable_plugins`.
-- `wheel_variant`: Override the Python wheel variant suffix (e.g. `-Dwheel_variant=rocm` yields `nixl_rocm`). Empty (default) = autodetect from the CUDA major version.
-
-#### Building for AMD ROCm
-
-NIXL itself builds vendor-neutrally; CPU-side hardware detection (`hwInfo::numAmdGpus`) discovers AMD GPUs via PCI vendor `0x1002` whether or not a ROCm toolchain is present. GPU-side ROCm/HIP build support is available for nixlbench and UCX plugin unit tests. When packaging a ROCm wheel, pass `-Dwheel_variant=rocm` so the wheel is named `nixl_rocm`.
-
-**Building with ROCm support:**
-```bash
-# For UCX unit tests with ROCm
-$ meson setup build -Drocm_path=/opt/rocm
-
-# Or specify a custom ROCm path
-$ meson setup build -Drocm_path=/custom/path/to/rocm
-```
-
-**Plugins on ROCm hosts (CUDA toolchain absent):**
-- `UCX` — primary transport for AMD GPU memory (requires UCX built with `--with-rocm`).
-- `POSIX`, `OBJ`, `AZURE_BLOB`, `HF3FS`, `MOONCAKE`, `GUSLI`, `UCCL` — vendor-neutral; build unchanged.
-- `GDS` / `GDS_MT`, `GPUNETIO`, `LIBFABRIC` (with `-DHAVE_CUDA`) — skip automatically because their CUDA / cuFile / DOCA dependencies are not found.
-
-**Known gaps (will be addressed in follow-up PRs):**
-- `LIBFABRIC` plugin disabled on ROCm pending header refactor.
-- No NVSHMEM-equivalent backend yet (rocSHMEM analog is a candidate for a future plugin).
+- `enable_plugins`: Comma-separated list of plugins to build (e.g. `-Denable_plugins=UCCL`). Cannot be used with `disable_plugins`.
+- `disable_plugins`: Comma-separated list of plugins to exclude. Cannot be used with `enable_plugins`.
+- `wheel_variant`: Override the Python wheel variant suffix (e.g. `-Dwheel_variant=vacc` yields `nixl_vacc`). Empty (default) = autodetect from the CUDA major version.
 
 #### Environment Variables
 
 There are a few environment variables that can be set to configure the build:
 - `NIXL_NO_STUBS_FALLBACK`: If not set or 0, build NIXL stub library if the library build fails
 
-### Building Documentation
-
-If you have Doxygen installed, you can build the documentation:
-
-```bash
-# Configure with documentation enabled
-$ meson setup <name_of_build_dir> -Dbuild_docs=true
-$ cd <name_of_build_dir>
-$ ninja
-
-# Documentation will be generated in <name_of_build_dir>/html
-# After installation (ninja install), documentation will be available in <prefix>/share/doc/nixl/
-```
-
 ### Python Interface
 
-NIXL provides Python bindings through pybind11. For detailed Python API documentation, see [docs/python_api.md](docs/python_api.md).
+NIXL provides Python bindings through pybind11.
 
 The preferred way to install the Python bindings is through pip from PyPI:
 
@@ -296,45 +224,8 @@ python3 -c "import nixl; agent = nixl.nixl_agent('agent1')"
 which should print:
 
 ```
-2026-01-08 13:36:27 NIXL INFO    _api.py:363 Backend UCX was instantiated
+2026-01-08 13:36:27 NIXL INFO    _api.py:363 Backend UCCL was instantiated
 2026-01-08 13:36:27 NIXL INFO    _api.py:253 Initialized NIXL agent: agent1
-```
-
-You can also run a complete Python example to test the installation:
-
-```
-python3 examples/python/expanded_two_peers.py --mode=target --use_cuda=true --ip=127.0.0.1 --port=4242 &
-sleep 5
-python3 examples/python/expanded_two_peers.py --mode=initiator --use_cuda=true --ip=127.0.0.1 --port=4242
-```
-
-For more Python examples, see [examples/python/](examples/python/).
-
-### Rust Bindings
-#### Build
-- Use `-Drust=true` meson option to build rust bindings.
-- Use `--buildtype=debug` for a debug build (default is release).
-- Or build manually:
-    ```bash
-    $ cargo build --release
-    ```
-#### Install
-The bindings will be installed under `nixl-sys` in the configured installation prefix.
-Can be done using ninja, from project build directory:
-```bash
-$ ninja install
-```
-
-#### Test
-```
-# Rust bindings tests
-$ cargo test
-```
-
-Use in your project by adding to `Cargo.toml`:
-```toml
-[dependencies]
-nixl-sys = { path = "path/to/nixl/bindings/rust" }
 ```
 
 ### Other build options
@@ -361,7 +252,7 @@ $ ./contrib/build-container.sh -h
 The container has the NIXL python bindings preinstalled (built from source against the container's own PyTorch). For a redistributable python wheel, use the wheel build script below or install the published `nixl` package.
 
 ### Building the python wheel
-The contrib folder also includes a script to build the python wheel with the UCX dependencies. Note, that UCX and other NIXL dependencies are required to be installed.
+The contrib folder also includes a script to build the python wheel. Note, that UCCL and other NIXL dependencies are required to be installed.
 ```
 $ ./contrib/build-wheel.sh
 ```
@@ -380,21 +271,6 @@ export NIXL_ETCD_ENDPOINTS="http://localhost:2379"
 export NIXL_ETCD_NAMESPACE="/nixl/agents"
 ```
 
-### Running the ETCD Example
-NIXL includes an example demonstrating metadata exchange and data transfer using ETCD:
-
-```bash
-# Start an ETCD server if not already running
-# For example:
-# docker run -d -p 2379:2379 quay.io/coreos/etcd:v3.5.1
-
-# Set the ETCD env variables as above
-
-# Run the example. The two agents in the example will exchange metadata through ETCD
-# and perform data transfers
-./<nixl_build_path>/examples/nixl_etcd_example
-```
-
 ### nixlbench Benchmark
 For more comprehensive testing, the nixlbench benchmarking tool supports ETCD for worker coordination:
 
@@ -404,21 +280,9 @@ cd benchmark/nixlbench
 meson setup build && cd build && ninja
 
 # Run benchmark with ETCD
-./nixlbench --etcd-endpoints http://localhost:2379 --backend UCX --initiator_seg_type VRAM
+./nixlbench --etcd-endpoints http://localhost:2379 --backend UCCL --initiator_seg_type VRAM
 ```
-
-## Code Examples
-
-* [C++ examples](https://github.com/ai-dynamo/nixl/tree/main/examples/cpp)
-
-* [Python examples](https://github.com/ai-dynamo/nixl/tree/main/examples/python)
-
-## Contributing
-
-For contribution guidelines, see [CONTRIBUTING.md](https://github.com/ai-dynamo/nixl/blob/main/CONTRIBUTING.md) (`CONTRIBUTING.md`).
 
 ## Third-Party Components
 
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.
-
-NIXL Python wheels bundle NVIDIA modules (`libuct_ib_mlx5_ext.so`, `libuct_ib_mlx5_gda.so`, `libuct_ib_mlx5_gdp.so`) licensed under the [NVIDIA Proprietary License](licenses/NVIDIA-proprietary-LICENSE.txt) (`LicenseRef-NvidiaProprietary`).

@@ -25,7 +25,6 @@ readme = "README.md"
 license = "MIT AND Apache-2.0"
 license-files = [
   "LICENSE",
-  "licenses/NVIDIA-proprietary-LICENSE.txt",
 ]
 requires-python = ">=3.10"
 authors = [
@@ -37,10 +36,10 @@ dependencies = ["torch", "numpy"]
 [tool.mypy]
 mypy_path = ["src/bindings/python/nixl-meta"]
 ignore_missing_imports = true
-# Two `nixl_ep/__init__.py` files coexist legitimately: the meta-dispatcher
-# under `src/bindings/python/nixl-meta/nixl_ep/` and the actual EP source
-# under `examples/device/ep/nixl_ep/`. Without explicit_package_bases mypy
-# refuses to resolve them and errors with "Duplicate module named nixl_ep".
+# The examples/ tree (which used to carry a second `nixl_ep` package next to
+# the meta-dispatcher under `src/bindings/python/nixl-meta/nixl_ep/`) was
+# removed in the v1.5.2-vacc lineage; keep explicit_package_bases so mypy
+# resolves packages from the project root regardless.
 explicit_package_bases = true
 
 [tool.isort]

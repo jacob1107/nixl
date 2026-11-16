@@ -443,10 +443,7 @@ xferBenchConfig::loadParams(void) {
         enable_vmm = NB_ARG(enable_vmm);
 
         if (enable_vmm) {
-#if HAVE_ROCM
-            std::cerr << "VMM is not supported with ROCm" << std::endl;
-            return -1;
-#elif HAVE_CUDA && !HAVE_CUDA_FABRIC
+#if HAVE_CUDA && !HAVE_CUDA_FABRIC
             std::cerr << "VMM is not supported in CUDA version " << CUDA_VERSION << std::endl;
             return -1;
 #endif
@@ -1007,11 +1004,8 @@ copyVramToHost(void *host_addr, const void *device_addr, size_t len) {
 #if HAVE_CUDA
     CHECK_CUDA_ERROR(cudaMemcpy(host_addr, (void *)device_addr, len, cudaMemcpyDeviceToHost),
                      "cudaMemcpy failed");
-#elif HAVE_ROCM
-    CHECK_CUDA_ERROR(hipMemcpy(host_addr, (void *)device_addr, len, hipMemcpyDeviceToHost),
-                     "hipMemcpy failed");
 #else
-    std::cerr << "VRAM not supported without CUDA, ROCm or Neuron" << std::endl;
+    std::cerr << "VRAM not supported without CUDA or Neuron" << std::endl;
     exit(EXIT_FAILURE);
 #endif
 }

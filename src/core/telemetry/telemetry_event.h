@@ -203,9 +203,9 @@ telemetryErrorStatusLabel(const nixl_telemetry_event_type_t type) noexcept {
 }
 
 /**
- * @brief Exporter-side Prometheus series descriptor for a telemetry event.
+ * @brief Exporter-side metric series descriptor for a telemetry event.
  *
- * The native Prometheus, multi-process Prometheus and DOCA/CollectX exporters
+ * Exporters (the removed Prometheus/DOCA ones used to, external ones can)
  * derive their series from this single mapping, so they emit the same metric
  * definitions. A null @c counterName, @c gaugeName, or @c histogramName means the
  * event has no cumulative counter, no last-operation gauge, or no distribution

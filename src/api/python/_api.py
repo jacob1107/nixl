@@ -155,7 +155,7 @@ class nixl_agent_config:
         capture_telemetry: Whether to enable telemetry capture.
         num_threads: Specify number of threads for the supported multi-threaded backends.
         backends: List of backend names for agent to initialize.
-            Default is UCX, other backends can be added to the list, or after
+            Default is UCCL, other backends can be added to the list, or after
             agent creation, can be initialized with create_backend.
         sync_mode: Thread synchronization mode to use for the agent.
             If None, sync_mode is set based on the enable_listen flag.
@@ -168,7 +168,7 @@ class nixl_agent_config:
         listen_port: int = DEFAULT_COMM_PORT,
         capture_telemetry: bool = False,
         num_threads: int = 0,
-        backends: list[str] = ["UCX"],
+        backends: list[str] = ["UCCL"],
         sync_mode: Optional[nixl_thread_sync_t] = None,
     ):
         # TODO: add backend init parameters
@@ -255,13 +255,8 @@ class nixl_agent:
             else:
                 # TODO: improve population of init from nixl_conf
                 init: dict[str, str] = {}
-                if nixl_conf.num_threads > 0:
-                    if bknd == "UCX" or bknd == "OBJ" or bknd == "LIBFABRIC":
-                        init["num_threads"] = str(nixl_conf.num_threads)
-                    elif bknd == "GDS_MT":
-                        init["thread_count"] = str(nixl_conf.num_threads)
-                    elif bknd == "UCCL":
-                        init["num_cpus"] = str(nixl_conf.num_threads)
+                if nixl_conf.num_threads > 0 and bknd == "UCCL":
+                    init["num_cpus"] = str(nixl_conf.num_threads)
                 self.create_backend(bknd, init)
 
         self.nixl_mems = {
@@ -751,8 +746,9 @@ class nixl_agent:
     @param dlist A local (nixlXferDList) or remote (nixlRemoteDList) dlist.
     @param backends Optional list of backend names to limit the preparation to.
     @return Opaque uintptr handle for the memory view.
-    @note Requires NIXL built against a UCX with the GPU device API (probe via
-          nixl._bindings.HAVE_UCX_GPU_DEVICE_API); otherwise the backend raises
+    @note Requires NIXL built with GPU device API support (probe via
+          nixl._bindings.HAVE_UCX_GPU_DEVICE_API, always false in this tree);
+          otherwise the backend raises
           nixlBackendError. The descriptors must reference device (VRAM) memory,
           and an active CUDA context must already exist when the owning agent is
           created. For a remote dlist, the remote agent's metadata -- including

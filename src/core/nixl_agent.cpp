@@ -41,9 +41,9 @@
 
 namespace {
 
-const std::vector<std::vector<std::string>> illegal_plugin_combinations = {
-    {"GDS", "GDS_MT"},
-};
+// Backends that may not be combined, e.g. {"A", "B"}. GDS/GDS_MT was the only
+// upstream entry and was removed with the storage plugins; kept empty for future use.
+const std::vector<std::vector<std::string>> illegal_plugin_combinations = {};
 
 } // namespace
 
@@ -272,25 +272,6 @@ nixlAgent::getBackendParams (const nixlBackendH* backend,
     return NIXL_SUCCESS;
 }
 
-void
-nixlAgentData::warnAboutEfaHardwareMismatch() {
-    // Atomic test-and-set so concurrent registerMem() calls warn at most once
-    // without racing on the flag.
-    if (efaWarningChecked.exchange(true)) {
-        return;
-    }
-
-    if ((backendEngines_.count("UCX") != 0) && (backendEngines_.count("LIBFABRIC") == 0)) {
-        const auto &hw_info = nixl::hwInfo::instance();
-        if (hw_info.numEfaDevices > 0) {
-            NIXL_WARN
-                << hw_info.numEfaDevices
-                << " Amazon EFA(s) were detected, but the UCX backend was configured."
-                   " For best performance, it's recommended to use the LIBFABRIC backend instead.";
-        }
-    }
-}
-
 nixl_status_t
 nixlAgent::createBackend(const nixl_backend_t &type,
                          const nixl_b_params_t &params,
@@ -426,8 +407,6 @@ nixlAgent::registerMem(const nixl_reg_dlist_t &descs,
     unsigned int    count = 0;
 
     NIXL_LOCK_GUARD(data->lock);
-
-    data->warnAboutEfaHardwareMismatch();
 
     if (!extra_params || extra_params->backends.size() == 0) {
         backend_list = &data->memToBackend[descs.getType()];

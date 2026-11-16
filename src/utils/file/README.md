@@ -1,6 +1,6 @@
 # File Utils, QueryMem API, and Path-Mode Registration
 
-This directory contains shared C++ utilities for NIXL file-aware backends:
+This directory contains shared C++ utilities for NIXL file handling:
 
 - `file_utils.{h,cpp}`: `nixl::queryFileInfo()` / `queryFileInfoList()` helpers
   for the QueryMem API (file existence + stat).
@@ -8,20 +8,15 @@ This directory contains shared C++ utilities for NIXL file-aware backends:
   owned-fd RAII base for path-mode FILE_SEG registration; see
   [Path-Mode File Registration](#path-mode-file-registration).
 
-All file-aware plugins (POSIX, HF3FS, CUDA_GDS, GDS_MT) link
-`file_utils_interface` and consume both sets of helpers.
+Upstream, all file-aware plugins (POSIX, HF3FS, CUDA_GDS, GDS_MT) linked
+`file_utils_interface` and consumed both sets of helpers. Those plugins were
+removed in this tree; the utilities remain for the core agent (queryMem on
+files) and for future file backends.
 
 ## QueryMem API Implementation through queryFileInfoList
 
-The QueryMem API has been implemented for these file backends:
-
-- **POSIX Backend** (`src/plugins/posix/`)
-- **HF3FS Backend** (`src/plugins/hf3fs/`)
-- **GDS MT Backend** (`src/plugins/gds_mt/`)
-- **CUDA GDS Backend** (`src/plugins/cuda_gds/`)
-
-The backend extracts the filenames from the input descriptors (`nixl_reg_dlist_t`) and passes them to queryFileInfoList.
-Then queryFileInfoList returns a vector of `nixl_query_resp_t` structures containing:
+The file-query core (`nixl::queryFileInfoList`) returns a vector of
+`nixl_query_resp_t` structures containing:
    - `accessible`: Boolean indicating if file exists
    - `info`: Additional file information (size, mode, mtime) if file exists
 
@@ -109,8 +104,8 @@ Examples: `ro:/var/cache/x.bin`, `rw,direct:/var/cache/x.bin`,
 
 Backends consume the shared helpers `nixl::parsePathMeta()` +
 `nixlFilePathMD` from `file_path_mode.{h,cpp}`. POSIX uses
-`nixlFilePathMD` directly; HF3FS / CUDA_GDS / GDS_MT extend their
+`nixlFilePathMD` directly; upstream backends (HF3FS / CUDA_GDS / GDS_MT) extended their
 existing per-descriptor MD struct with `owned` (and close the fd in
-`deregisterMem` after the backend-specific teardown). The GDS per-fd
+`deregisterMem` after the backend-specific teardown). The upstream GDS per-fd
 caches key on the *opened* fd, so two path-mode registrations of the
 same path yield two cuFile handles (no path-level dedup).

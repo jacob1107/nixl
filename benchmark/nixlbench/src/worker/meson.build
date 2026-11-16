@@ -26,8 +26,6 @@ worker_deps = [
 
 if cuda_available
   worker_deps += [cuda_dep]
-elif rocm_available
-  worker_deps += [rocm_dep]
 endif
 
 worker_lib = static_library('worker',

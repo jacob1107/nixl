@@ -15,7 +15,6 @@ CODEOWNERS @ai-dynamo/Devops @ai-dynamo/nixl-maintainers
 
 # Bindings
 /src/bindings/python @ovidiusm @mkhazraee @roiedanino
-/src/bindings/rust @roiedanino @gleon99 @tomerg-nvidia @mkhazraee
 
 # Tracing
 /src/core/tracing/ @e-eygin @ai-dynamo/nixl-maintainers

@@ -269,24 +269,6 @@ RUN git clone --depth 1 https://github.com/Azure/azure-sdk-for-cpp.git --branch 
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.86.0 \
-    RUSTARCH=${ARCH}-unknown-linux-gnu
-
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    case "$ARCH" in \
-        aarch64) RUSTUP_SHA256="c64b33db2c6b9385817ec0e49a84bcfe018ed6e328fe755c3c809580cc70ce7a" ;; \
-        x86_64) RUSTUP_SHA256="a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f" ;; \
-        *) echo "Unsupported architecture for Rust: $ARCH" && exit 1 ;; \
-    esac && \
-    echo "$RUSTUP_SHA256 *rustup-init" | sha256sum -c - && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
 RUN wget --tries=3 --waitretry=5 https://www.mellanox.com/downloads/DOCA/DOCA_v3.3.0/host/doca-host-3.3.0-088000_26.01_rhel8.${ARCH}.rpm -O doca-host.rpm && \
     rpm -i doca-host.rpm && \
     dnf install -y libnl3-devel && \
@@ -496,13 +478,7 @@ RUN if [ "$BUILD_UCX_SPCX_PLUGIN" = "true" ]; then \
 
 RUN rm -rf build && \
     mkdir build && \
-    if [ "$BUILD_NIXL_EP" = "true" ]; then \
-        echo "=== BUILD_NIXL_EP=true: Building NIXL with NIXL EP support ===" && \
-        NIXL_EP_FLAG="-Dbuild_nixl_ep=true -Dbuild_examples=true"; \
-    else \
-        NIXL_EP_FLAG=""; \
-    fi && \
-    meson setup build/ --prefix=/usr/local/nixl --buildtype=$BUILD_TYPE $NIXL_EP_FLAG -Ducx_path=/usr/local \
+    meson setup build/ --prefix=/usr/local/nixl --buildtype=$BUILD_TYPE \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
     -Drelease_wheel=true && \

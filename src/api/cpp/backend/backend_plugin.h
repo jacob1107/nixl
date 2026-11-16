@@ -23,9 +23,6 @@
 
 #include <string>
 
-// Forward declarations for special engine types
-class nixlUcxEngine;
-
 // Plugins must be compiled with the same C++ standard and a compatible
 // libstdc++ ABI as the NIXL core library. NIXL core currently requires C++20.
 
@@ -89,14 +86,8 @@ private:
     [[nodiscard]] static nixlBackendEngine *
     createEngine(const nixlBackendInitParams *init_params) {
         try {
-            if constexpr (std::is_same_v<EngineType, nixlUcxEngine>) {
-                // UCX engine uses a factory pattern
-                auto engine = EngineType::create(*init_params);
-                return engine.release();
-            } else {
-                // Other engines use direct constructor
-                return new EngineType(init_params);
-            }
+            // Engines use direct construction from the init params
+            return new EngineType(init_params);
         }
         catch (const std::exception &e) {
             NIXL_ERROR << "Failed to create engine: " << e.what();

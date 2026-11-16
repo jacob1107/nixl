@@ -303,15 +303,10 @@ RUN rm -rf build && \
 
 WORKDIR /workspace/nixl
 
-RUN ls -ll benchmark/kvbench
-
-# Install dependencies for benchmarks
-RUN uv pip install --system -e benchmark/kvbench
-
 ENV PATH=/usr/local/nixlbench/bin:/usr/local/nixl/bin:$PATH
 ENV LD_LIBRARY_PATH=/usr/local/nixlbench/lib:$LD_LIBRARY_PATH
 ENV PYTHONPATH=/usr/local/nixlbench/lib/python3/dist-packages/nixlbench/
 
 # Fix for etcd proto dependencies
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-WORKDIR /workspace/nixl/benchmark/kvbench
+WORKDIR /workspace/nixl/benchmark/nixlbench
