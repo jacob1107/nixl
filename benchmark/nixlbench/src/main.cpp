@@ -25,9 +25,6 @@
 #endif
 #include "utils/scope_guard.h"
 #include "worker/nixl/nixl_worker.h"
-#if HAVE_NVSHMEM && HAVE_CUDA
-#include "worker/nvshmem/nvshmem_worker.h"
-#endif
 #include <unistd.h>
 #include <memory>
 #include <csignal>
@@ -169,13 +166,6 @@ createWorker() {
             return nullptr;
         }
         return std::make_unique<xferBenchNixlWorker>(devices);
-    } else if (xferBenchConfig::worker_type == XFERBENCH_WORKER_NVSHMEM) {
-#if HAVE_NVSHMEM && HAVE_CUDA
-        return std::make_unique<xferBenchNvshmemWorker>();
-#else
-        std::cerr << "NVSHMEM worker requested but NVSHMEM or CUDA is not available" << std::endl;
-        return nullptr;
-#endif
     } else {
         std::cerr << "Unsupported worker type: " << xferBenchConfig::worker_type << std::endl;
         return nullptr;

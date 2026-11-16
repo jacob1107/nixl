@@ -26,7 +26,6 @@ ARG DEFAULT_PYTHON_VERSION="3.12"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
 ARG UCX_REF="v1.23.x"
 ARG UCX_SONAME_SUFFIX=""
-ARG BUILD_NIXL_EP="true"
 ARG RDMA_CORE_PREFIX="/usr"
 ARG UCX_PREFIX="/usr"
 ARG UCX_PLUGIN_DIR="$UCX_PREFIX/lib/ucx"
@@ -193,7 +192,7 @@ RUN cd /usr/local/src && \
      cd ucx && \
      echo "=== Using UCX_REF=$UCX_REF ===" && \
      git checkout $UCX_REF && \
-     if [ "$BUILD_NIXL_EP" = "true" ]; then EXPERIMENTAL_API_PARAM="--enable-experimental-api"; else EXPERIMENTAL_API_PARAM=""; fi && \
+        EXPERIMENTAL_API_PARAM="" && \
      ./autogen.sh && \
      if [ -n "$UCX_SONAME_SUFFIX" ]; then \
          if ./configure --help | grep -q -- "--with-soname-suffix"; then \

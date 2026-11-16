@@ -38,9 +38,6 @@ etcd_inc_path = get_option('etcd_inc_path')
 etcd_lib_path = get_option('etcd_lib_path')
 # NIXL
 nixl_path = get_option('nixl_path')
-# NVSHMEM
-nvshmem_inc_path = get_option('nvshmem_inc_path')
-nvshmem_lib_path = get_option('nvshmem_lib_path')
 
 # Find required libraries
 # NIXL
@@ -141,23 +138,9 @@ endif
 
 etcd_inc = etcd_inc_path
 nixl_inc = nixl_path + '/include'
-nvshmem_inc = nvshmem_inc_path
 
 inc_dir = include_directories('.', './src/', nixl_inc)
 
-nvshmem_available = false
-if nvshmem_lib_path != ''
-    if cpp.has_header('nvshmem.h', include_directories: include_directories(nvshmem_inc))
-        nvshmem_lib = cpp.find_library('nvshmem', dirs: [nvshmem_lib_path])
-        nvshmem_host_lib = cpp.find_library('nvshmem_host', dirs: [nvshmem_lib_path])
-        if nvshmem_lib.found()
-            nvshmem_available = true
-            inc_dir = include_directories('.', './src/', nixl_inc, nvshmem_inc)
-            add_project_arguments('-DHAVE_NVSHMEM', language: 'cpp')
-            add_project_arguments('-Wno-unused-variable', language: 'cpp')
-        endif
-    endif
-endif
 
 if cuda_available
     add_project_arguments('-DHAVE_CUDA', language: 'cpp')
@@ -202,8 +185,6 @@ elif not cuda_available
     message('UCX GPU Device API is unavailable because CUDA is unavailable.')
 elif not nvcc_prog.found()
     message('UCX GPU Device API is unavailable because nvcc was not found.')
-elif nvshmem_available
-    message('UCX GPU Device API is unavailable because the NVSHMEM build path is enabled.')
 else
     add_languages('cuda', native: false)
     add_project_arguments('-std=c++20', language: 'cuda')
@@ -303,7 +284,6 @@ configure_file(
     output: 'config.h',
     configuration: {
         'HAVE_ETCD': etcd_available ? '1' : '0',
-        'HAVE_NVSHMEM': nvshmem_available ? '1' : '0',
         'HAVE_CUDA': cuda_available ? '1' : '0',
         'HAVE_CUDA_FABRIC': cuda_fabric_available ? '1' : '0',
         'HAVE_RAW_CLI': raw_cli_available ? '1' : '0',
@@ -326,80 +306,14 @@ endif
 if ucx_gpu_device_api_available
     deps += [nixlbench_kernels_dep]
 endif
-if nvshmem_available
-    deps += [nvshmem_lib]
-    args += [
-        '-Xcompiler', '-fopenmp',
-        '-Xlinker', '-rpath=/usr/local/cuda/lib64',
-        '-Xlinker', '--allow-shlib-undefined',
-        '-lcudart',
-        '-lcudadevrt',
-    ]
-endif
 
-if nvshmem_available
-    # Use nvcc directly for compilation and linking
-    nvcc = find_program('nvcc')
-    nvcc_args = []
-    if etcd_available
-        if etcd_inc != ''
-            nvcc_args += ['-I' + etcd_inc]
-        endif
-    endif
-    nvcc_args += ['-I' + nixl_inc]
-    nvcc_args += ['-I' + nvshmem_inc]
-    nvcc_args += ['-I.', '-I./src/', '-I../src/']
-    nvcc_args += ['-I' + meson.current_build_dir()]
-    if etcd_available
-        if etcd_lib_path != ''
-            nvcc_args += ['-L' + etcd_lib_path]
-        endif
-    endif
-    nvcc_args += ['-L' + nixl_lib_path]
-    nvcc_args += ['-L' + nvshmem_lib_path]
-    nvcc_args += ['-L' + meson.current_build_dir() + '/src/utils']
-    nvcc_args += ['-L' + meson.current_build_dir() + '/src/runtime']
-    nvcc_args += ['-L' + meson.current_build_dir() + '/src/worker']
-    nvcc_args += ['-lnixl', '-lnixl_build', '-lserdes', '-lcuda', '-lcudart', '-lnvshmem']
-    nvcc_args += args
-    nvcc_cmd_files = [
-                 meson.current_build_dir() + '/src/utils/libutils.a.p/utils.cpp.o',
-                 meson.current_build_dir() + '/src/runtime/libruntime.a.p/runtime.cpp.o',
-                 meson.current_build_dir() + '/src/worker/libworker.a.p/worker.cpp.o',
-                 meson.current_build_dir() + '/src/worker/nixl/libnixl_worker.a.p/nixl_worker.cpp.o',
-                 meson.current_build_dir() + '/src/worker/nvshmem/libnvshmemWorker.a.p/nvshmem_worker.cpp.o'
-                 ]
-
-    if raw_cli_available
-        nvcc_cmd_files += meson.current_build_dir() + '/src/utils/libutils.a.p/raw_cli.cpp.o'
-    endif
-
-    if etcd_available
-        nvcc_args += ['-letcd-cpp-api-core', '-lcpprest']
-        etcd_rt = meson.current_build_dir() + '/src/runtime/etcd/libetcd_rt.a.p/etcd_rt.cpp.o'
-        nvcc_cmd_files += etcd_rt
-    endif
-
-    nvcc_command = [nvcc, nvcc_args, '-o', '@OUTPUT@', '@INPUT@']
-    nvcc_command += nvcc_cmd_files
-
-    nixlbench_target = custom_target('nixlbench',
-        input: 'src/main.cpp',
-        output: 'nixlbench',
-        command: nvcc_command,
-        build_by_default: true,
-        install: true,
-        install_dir: get_option('bindir'),
-        depends: [nixlbench_runtimes, utils_lib, worker_libs])
-else
-    nixlbench_target = executable('nixlbench', 'src/main.cpp',
-                include_directories: inc_dir,
-                link_with: [nixlbench_runtimes, utils_lib, worker_libs],
-                dependencies: deps,
-                link_args: args,
-                install: true,
-                install_dir: get_option('bindir'))
-endif
+nixlbench_target = executable('nixlbench', 'src/main.cpp',
+            include_directories: inc_dir,
+            link_with: [nixlbench_runtimes, utils_lib, worker_libs],
+            dependencies: deps,
+            link_args: args,
+            install: true,
+            install_dir: get_option('bindir'))
 
 if get_option('build_tests') and get_option('buildtype') != 'release'
     if raw_cli_available

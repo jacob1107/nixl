@@ -54,7 +54,7 @@ NB_ARG_STRING(
 NB_ARG_STRING(runtime_type,
               XFERBENCH_RT_ETCD,
               "Runtime type to use for communication [ETCD, ASIO]");
-NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl, nvshmem]");
+NB_ARG_STRING(worker_type, XFERBENCH_WORKER_NIXL, "Type of worker [nixl]");
 NB_ARG_STRING(backend,
               XFERBENCH_BACKEND_UCX,
               "Name of NIXL backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, "
@@ -696,25 +696,6 @@ xferBenchConfig::loadParams(void) {
         return -1;
     }
 
-    if (worker_type == XFERBENCH_WORKER_NVSHMEM) {
-        if (!((XFERBENCH_SEG_TYPE_VRAM == initiator_seg_type) &&
-              (XFERBENCH_SEG_TYPE_VRAM == target_seg_type) && (1 == num_threads) &&
-              (1 == num_initiator_dev) && (1 == num_target_dev) &&
-              (XFERBENCH_SCHEME_PAIRWISE == scheme))) {
-            std::cerr << "Unsupported configuration for NVSHMEM worker" << std::endl;
-            std::cerr << "Supported configuration: " << std::endl;
-            std::cerr << std::string(20, '*') << std::endl;
-            std::cerr << "initiator_seg_type = VRAM" << std::endl;
-            std::cerr << "target_seg_type = VRAM" << std::endl;
-            std::cerr << "num_threads = 1" << std::endl;
-            std::cerr << "num_initiator_dev = 1" << std::endl;
-            std::cerr << "num_target_dev = 1" << std::endl;
-            std::cerr << "scheme = pairwise" << std::endl;
-            std::cerr << std::string(20, '*') << std::endl;
-            return -1;
-        }
-    }
-
     if ((max_block_size * max_batch_size) > (total_buffer_size / num_initiator_dev)) {
         std::cerr
             << "Incorrect buffer size configuration for Initiator"
@@ -801,7 +782,7 @@ xferBenchConfig::printConfig() {
         printOption("ASIO Address (--asio_address) ", asio_address);
         printOption("ASIO Port (--asio_port) ", std::to_string(asio_port));
     }
-    printOption("Worker type (--worker_type=[nixl,nvshmem])", worker_type);
+    printOption("Worker type (--worker_type=[nixl])", worker_type);
     if (worker_type == XFERBENCH_WORKER_NIXL) {
         printOption("Backend (--backend=[UCX,GDS,GDS_MT,POSIX,Mooncake,HF3FS,OBJ,AZURE_BLOB])",
                     backend);

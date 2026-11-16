@@ -131,13 +131,13 @@ def main() -> int:
     parser.add_argument(
         "--pattern",
         required=True,
-        help="basename glob of files to merge (e.g. 'nixl_ep_cpp_torch212.*')",
+        help="basename glob of files to merge (e.g. 'some_module_torch212.*')",
     )
     parser.add_argument(
         "--target-dir",
         required=True,
         help="directory inside the base wheel for the merged files "
-        "(e.g. 'nixl_ep_cu13')",
+        "(e.g. 'merged_libs')",
     )
     args = parser.parse_args()
 

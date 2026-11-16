@@ -36,10 +36,9 @@ dependencies = ["torch", "numpy"]
 [tool.mypy]
 mypy_path = ["src/bindings/python/nixl-meta"]
 ignore_missing_imports = true
-# The examples/ tree (which used to carry a second `nixl_ep` package next to
-# the meta-dispatcher under `src/bindings/python/nixl-meta/nixl_ep/`) was
-# removed in the v1.5.2-vacc lineage; keep explicit_package_bases so mypy
-# resolves packages from the project root regardless.
+# examples/ and the former `nixl_ep` package were removed in the v1.5.2-vacc
+# lineage; keep explicit_package_bases so mypy resolves packages from the
+# project root regardless.
 explicit_package_bases = true
 
 [tool.isort]

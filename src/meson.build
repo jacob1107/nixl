@@ -17,22 +17,8 @@ subdir('api')
 
 subdir('utils')
 
-#subdir('arch')
 subdir('infra')
 subdir('plugins')
 subdir('core')
-
-# Test utilities library - created after nixl_dep is available to avoid circular dependencies
-nixl_test_utils_lib = library('nixl_test_utils',
-                             'infra/test_utils.cpp',
-                             include_directories: [ nixl_inc_dirs, utils_inc_dirs ],
-                             dependencies: [nixl_dep, nixl_common_dep, absl_log_dep],
-                             install: true)
-
-nixl_test_utils_dep = declare_dependency(
-    include_directories: include_directories('infra'),
-    link_with: nixl_test_utils_lib,
-    dependencies: [nixl_dep, nixl_common_dep]
-)
 
 subdir('bindings')

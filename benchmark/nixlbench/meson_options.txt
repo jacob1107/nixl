@@ -22,7 +22,5 @@ option('ucx_device_cuda_arch_list', type: 'string', value: 'auto',
 option('etcd_inc_path', type: 'string', value: '', description: 'Path to ETCD C++ Client includes')
 option('etcd_lib_path', type: 'string', value: '', description: 'Path to ETCD C++ Client library')
 option('nixl_path', type: 'string', value: '/usr/local', description: 'Path to NiXL')
-option('nvshmem_inc_path', type: 'string', value: '', description: 'Path to NVSHMEM include directory')
-option('nvshmem_lib_path', type: 'string', value: '', description: 'Path to NVSHMEM library directory')
 option('build_raw_cli', type: 'boolean', value: false, description: 'Build the experimental CLI11-based raw command path')
 option('build_tests', type: 'boolean', value: true, description: 'Build NIXLBench tests for non-release builds')

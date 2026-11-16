@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers for the NIXL meta packages (``nixl`` and ``nixl_ep``)."""
+"""Shared helpers for the NIXL meta package (``nixl``)."""
 
 import importlib.util
 import pathlib

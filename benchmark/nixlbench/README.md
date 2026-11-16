@@ -42,7 +42,6 @@ A comprehensive benchmarking tool for the NVIDIA Inference Xfer Library (NIXL) t
 - **Memory Type Support**: Tests both CPU (DRAM) and GPU (VRAM) memory transfers
 - **Multiple Worker Types**:
   - **NIXL worker**: Full-featured with all backend support
-  - **NVSHMEM worker**: GPU-focused with VRAM-only transfers
 - **Cloud-Native Coordination**: Uses ETCD for worker coordination - ideal for containerized environments
 - **Performance Features**:
   - Multi-threading support with configurable progress threads
@@ -202,7 +201,6 @@ For development environments or when Docker is not available.
 - **Azure SDK for C++**: For Azure Blob Storage backend
 - **GDS**: NVIDIA GPUDirect Storage
 - **GUSLI**: G3+ User Space Access Library for direct block device access
-- **NVSHMEM**: Required for NVSHMEM worker type
 - **hwloc**: Hardware locality detection (required for Libfabric only)
 
 **Python Dependencies:**
@@ -383,8 +381,6 @@ export LD_LIBRARY_PATH=/usr/local/nixlbench/lib:$LD_LIBRARY_PATH
 - `cudapath_stub`: Extra stub path for CUDA
 - `etcd_inc_path`: Path to ETCD C++ client includes
 - `etcd_lib_path`: Path to ETCD C++ client library
-- `nvshmem_inc_path`: Path to NVSHMEM include directory
-- `nvshmem_lib_path`: Path to NVSHMEM library directory
 - `build_raw_cli`: Build the experimental CLI11-based raw command path (default: false)
 - `build_tests`: Build NIXLBench tests for non-release builds (default: true)
 - `buildtype`: Build type: `debug`, `release`, `debugoptimized` (default: release)
@@ -500,7 +496,7 @@ sudo systemctl start etcd && sudo systemctl enable etcd
 ```
 --config_file PATH         # Configuraion file (default: NONE)
 --runtime_type NAME        # Type of runtime to use [ETCD] (default: ETCD)
---worker_type NAME         # Worker to use to transfer data [nixl, nvshmem] (default: nixl)
+--worker_type NAME         # Worker to use to transfer data [nixl] (default: nixl)
 --backend NAME             # Communication backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, AZURE_BLOB, GUSLI, INFINIA] (default: UCX)
 --benchmark_group NAME     # Name of benchmark group for parallel runs (default: default)
 --etcd_endpoints URL       # ETCD server URL for coordination (default: http://localhost:2379)
@@ -857,14 +853,6 @@ EOF
   --initiator_seg_type DRAM \
   --target_seg_type DRAM \
   --num_iter 16
-```
-
-### Worker Types
-
-**NVSHMEM Worker:**
-```bash
-# NVSHMEM (GPU-only, VRAM required)
-./nixlbench --etcd_endpoints http://etcd-server:2379 --worker_type nvshmem --initiator_seg_type VRAM --target_seg_type VRAM
 ```
 
 ### S3 Object Storage Backend

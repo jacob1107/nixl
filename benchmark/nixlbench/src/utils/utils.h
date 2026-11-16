@@ -128,7 +128,6 @@
 
 // Worker types
 #define XFERBENCH_WORKER_NIXL "nixl"
-#define XFERBENCH_WORKER_NVSHMEM "nvshmem"
 
 // Randomization location modes
 #define XFERBENCH_RANDOMIZE_LOCATION_MODE_NONE "none"

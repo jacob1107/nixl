@@ -45,7 +45,6 @@ UCX_REPO=${UCX_REPO:-https://github.com/openucx/ucx.git}
 UCX_REF=${UCX_REF:-v1.23.x}
 UCX_SONAME_SUFFIX=${UCX_SONAME_SUFFIX:-}
 PRIVATE_UCX_SONAME_SUFFIX="nixl"
-BUILD_NIXL_EP="true"
 OS="ubuntu24"
 NPROC=${NPROC:-$(nproc)}
 GRPC_NPROC=${GRPC_NPROC:-$(nproc)}
@@ -143,14 +142,6 @@ get_options() {
                 missing_requirement $1
             fi
             ;;
-        --torch-versions)
-            if [ "$2" ]; then
-                WHL_TORCH_VERSIONS=$2
-                shift
-            else
-                missing_requirement $1
-            fi
-            ;;
         --cuda-version)
             if [ "$2" ]; then
                 CUDA_VERSION=$2
@@ -201,9 +192,6 @@ get_options() {
             ;;
         --private-ucx)
             UCX_SONAME_SUFFIX=${UCX_SONAME_SUFFIX:-$PRIVATE_UCX_SONAME_SUFFIX}
-            ;;
-        --build-nixl-ep)
-            BUILD_NIXL_EP=true
             ;;
         --build-ucx-spcx-plugin)
             BUILD_UCX_SPCX_PLUGIN="true"
@@ -301,11 +289,6 @@ show_build_options() {
         echo "UCX SONAME suffix: Disabled"
         echo "UCX module deepbind: Disabled"
     fi
-    if [ "$BUILD_NIXL_EP" = "true" ]; then
-        echo "NIXL EP: Enabled"
-    else
-        echo "NIXL EP: Disabled"
-    fi
     if [ "$BUILD_INFINIA" = "true" ]; then
         echo "Infinia DDN plugin: Enabled (image: ${INFINIA_LIBS_IMAGE})"
     else
@@ -351,7 +334,6 @@ UCX_REPO="${UCX_REPO}"
 UCX_REF="${UCX_REF}"
 UCX_SHA="${ucx_sha}"
 UCX_SONAME_SUFFIX="${UCX_SONAME_SUFFIX}"
-BUILD_NIXL_EP="${BUILD_NIXL_EP}"
 BUILD_INFINIA="${BUILD_INFINIA}"
 INFINIA_LIBS_IMAGE="${INFINIA_LIBS_IMAGE}"
 BUILD_UCX_SPCX_PLUGIN="${BUILD_UCX_SPCX_PLUGIN}"
@@ -377,12 +359,10 @@ show_help() {
     echo "  [--ucx-ref ucx git reference (branch, tag, or sha)]"
     echo "  [--ucx-soname-suffix suffix to pass to UCX --with-soname-suffix]"
     echo "  [--private-ucx shortcut for --ucx-soname-suffix ${PRIVATE_UCX_SONAME_SUFFIX}; requires a UCX ref with --with-soname-suffix and --enable-module-deepbind]"
-    echo "  [--build-nixl-ep build NIXL with NIXL EP support (requires UCX >= 1.21)]"
     echo "  [--build-ucx-spcx-plugin build the UCX spcx external plugin (requires NIXL_GITLAB_TOKEN and NIXL_SPCX_PLUGIN_REPO_URL in the environment) (requires --dockerfile contrib/Dockerfile or contrib/Dockerfile.manylinux; bundled into the wheel only on the manylinux path)]"
     echo "  [--ucx-spcx-plugin-ref git ref of ucx-spcx-plugin to build (default: ${UCX_SPCX_PLUGIN_REF})]"
     echo "  [--arch [x86_64|aarch64] to select target architecture]"
     echo "  [--dockerfile path to a dockerfile to use]"
-    echo "  [--torch-versions torch versions to build for, comma separated (default: uses Dockerfile ARG default)]"
     echo "  [--cuda-version CUDA MAJOR.MINOR for the manylinux wheel build, e.g. 12.9 (default: ${CUDA_VERSION_DEFAULT})]
   [--manylinux-image PyPA manylinux image prefix (default: ${MANYLINUX_IMAGE})]
   [--manylinux-image-tag pinned PyPA manylinux image tag (default: ${MANYLINUX_IMAGE_TAG})]"
@@ -414,7 +394,6 @@ BUILD_ARGS+="${BASE_IMAGE:+ --build-arg BASE_IMAGE=$BASE_IMAGE}"
 BUILD_ARGS+="${BASE_IMAGE_TAG:+ --build-arg BASE_IMAGE_TAG=$BASE_IMAGE_TAG}"
 BUILD_ARGS+=" --build-arg MANYLINUX_IMAGE=$MANYLINUX_IMAGE --build-arg MANYLINUX_IMAGE_TAG=$MANYLINUX_IMAGE_TAG"
 BUILD_ARGS+=" --build-arg WHL_PYTHON_VERSIONS=$WHL_PYTHON_VERSIONS"
-BUILD_ARGS+="${WHL_TORCH_VERSIONS:+ --build-arg WHL_TORCH_VERSIONS=$WHL_TORCH_VERSIONS}"
 CUDA_VERSION="${CUDA_VERSION:-$CUDA_VERSION_DEFAULT}"
 BUILD_ARGS+=" --build-arg CUDA_VERSION=$CUDA_VERSION"
 BUILD_ARGS+=" --build-arg WHL_PLATFORM=$WHL_PLATFORM"
@@ -422,7 +401,6 @@ BUILD_ARGS+=" --build-arg ARCH=$ARCH"
 BUILD_ARGS+=" --build-arg UCX_REPO=$UCX_REPO"
 BUILD_ARGS+=" --build-arg UCX_REF=$UCX_REF"
 BUILD_ARGS+=" --build-arg UCX_SONAME_SUFFIX=$UCX_SONAME_SUFFIX"
-BUILD_ARGS+=" --build-arg BUILD_NIXL_EP=$BUILD_NIXL_EP"
 BUILD_ARGS+=" --build-arg NPROC=$NPROC"
 BUILD_ARGS+=" --build-arg GRPC_NPROC=$GRPC_NPROC"
 BUILD_ARGS+=" --build-arg OS=$OS"
