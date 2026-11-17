@@ -32,6 +32,10 @@
 # - 引擎只 UCCL（本分支 all_plugins 仅此，enable_plugins 填别的 meson 直接报
 #   错）；nvcc 12.4 最高 sm_90，架构列表固定 80,86,89,90；meta 轮子只随 cu12
 #   产出（-Drelease_wheel=true，钉 cu12/cu13 两个依赖）。
+# - 引擎不链 libpython（Py* 符号留给宿主解释器解析）：Python 宿主无恙，但
+#   nixlbench 是纯 C++ 进程，RTLD_NOW dlopen 直接炸 undefined symbol——full
+#   段末尾以 nm 生成的 Py* 桩库 patchelf 进 /usr/local 的引擎副本（轮子 dist/
+#   不受影响），bench_cuda12 同款。
 # - 网络（国内）：dnf 华为云、uv/PyPI TUNA、github 断流靠重试；小写代理 ARG
 #   传入即全走代理（huaweicloud/tuna 域名须进 no_proxy 直连）。UCCL commit 钉
 #   NIXL v1.5.0 CI 的 da914a20（插件用变长通知 API，不能回退旧 commit）。
@@ -183,6 +187,8 @@ ENV PATH=/workspace/.venv/bin:${PATH}
 # 存在的 -lpython3.6m——make 命令行覆盖 PYTHON_LDFLAGS/PYTHON_LIB 把 -lpython*
 # 整个拿掉（保留非 python 尾巴），CXX 加 -Wl,--as-needed 挡未引用库，install 后
 # readelf 断言 DT_NEEDED 无 libpython（上游漂移时在本层报错，不发货坏轮子）。
+# 拿掉 libpython 的代价：nixlbench 纯 C++ 宿主解析不到 Py* 符号——full 段末的
+# Py* 桩兜底层补上。
 RUN [ -e /usr/local/cuda/lib64/libcuda.so ] || \
         ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so; \
     cd /tmp && \
@@ -585,6 +591,43 @@ RUN set -eux; \
     echo "nixlbench + etcd OK"
 
 ENV PATH=/usr/local/nixlbench/bin:${PATH}
+
+# --- Py* 未定义符号兜底（引擎不链 libpython 的必然代价） ----------------------------------
+# 引擎按 Linux 扩展惯例不链 libpython，PyGILState_Ensure/PyErr_CheckSignals 等
+# 留给宿主解释器解析：轮子场景宿主是 Python（解释器符号进进程全局域）无恙；
+# nixlbench 是纯 C++ 进程，进程内没有任何 Py* 符号，而 nixl_plugin_manager 以
+# RTLD_NOW dlopen 插件，引擎的未定义符号当场炸出 "undefined symbol:
+# PyGILState_Release"、UCCL 后端加载失败。修法：nm 实时提取引擎全部未定义 Py*
+# 符号生成无操作桩库（上游引擎将来新增引用自动覆盖），patchelf --add-needed 进
+# /usr/local/lib 的引擎——dlopen 插件组时随之进入局部作用域完成解析。Python
+# 宿主里符号查找全局域先于 dlopen 组局部域（deepbind 默认关），真解释器符号
+# 优先，桩永不被用。本层放段末：轮子层已结束，dist/ 内 auditwheel vendor 的是
+# 打补丁前的引擎副本，轮子形状与 wheels_cuda12 完全一致。
+RUN set -eux; \
+    command -v patchelf >/dev/null || { dnf install -y patchelf; dnf clean all; rm -rf /var/cache/dnf; }; \
+    SYMS=$(nm -D --undefined-only /usr/local/lib/libuccl_p2p.so \
+        | awk '$1=="U" && $2 ~ /^_?Py/ {print $2}' | sort -u); \
+    [ -n "$SYMS" ] || { echo 'ERROR: libuccl_p2p.so 已无未定义 Py* 符号，本兜底层过时，请移除'; exit 1; }; \
+    { echo '/* 自动生成：无解释器宿主（nixlbench）的 Py* 桩。Python 宿主中被全局域真符号遮蔽，不会生效 */'; \
+      echo '#include <stdio.h>'; \
+      for s in $SYMS; do \
+        case "$s" in \
+            PyGILState_Ensure) echo 'int PyGILState_Ensure(void) { return 0; }' ;; \
+            PyGILState_Release) echo 'void PyGILState_Release(int st) { (void)st; }' ;; \
+            PyErr_CheckSignals) echo 'int PyErr_CheckSignals(void) { return 0; }' ;; \
+            *) echo "void $s(void) { fprintf(stderr, \"pyapi stub hit: $s (host has no interpreter)\\n\"); }" ;; \
+        esac; \
+      done; } > /tmp/pyapi_stubs.c; \
+    echo "=== Py* stub symbols: $(echo $SYMS | tr '\n' ' ') ==="; \
+    gcc -shared -fPIC -O2 -Wl,-soname,libpyapi_stubs.so -o /usr/local/lib/libpyapi_stubs.so /tmp/pyapi_stubs.c && \
+    patchelf --add-needed libpyapi_stubs.so /usr/local/lib/libuccl_p2p.so && \
+    ldconfig && \
+    readelf -d /usr/local/lib/libuccl_p2p.so | grep -q libpyapi_stubs.so && \
+    if ldd -r /usr/local/lib/libuccl_p2p.so 2>&1 | grep -Eq 'undefined symbol: *_?Py'; then \
+        echo 'ERROR: 引擎仍有未解析 Py* 符号'; \
+        ldd -r /usr/local/lib/libuccl_p2p.so 2>&1 | grep 'undefined symbol' || true; exit 1; \
+    fi; \
+    rm -f /tmp/pyapi_stubs.c
 
 # 构建产物：/workspace/nixl/dist 全矩阵轮子（nixl_cu12-*-cp310..cp314-*
 # manylinux_2_28_x86_64.whl + meta 轮子 nixl-*-py3-none-any.whl）、
