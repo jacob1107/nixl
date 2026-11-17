@@ -14,12 +14,11 @@
 # limitations under the License.
 
 # NIXL manylinux 全能力构建容器（CUDA 12）：UCCL 引擎 + 全矩阵轮子 + nixlbench
-# + etcd。轮子链的指令序列与 contrib/Dockerfile.all_cuda12 逐字一致（本文件是
-# 注释精简版；注释不参与 BuildKit 缓存键，跨文件层缓存照常共享；完整修复史
-# 见该文件），nixlbench/etcd 段改编自 Dockerfile.all 并按 el8/UCCL-only 适配。
-# 只出轮子优先两步流程 contrib/build-wheels-uccl-cu12.sh；本文件用于"轮子与
-# 基准工具一次要齐"的整建。指令级修复须在产轮子的文件间同步（full/
-# all_cuda12/uccl_engine_cuda12/manylinux_uccl_cuda12）。
+# + etcd。引擎/轮子配方与 contrib/Dockerfile.uccl_engine_cuda12 同源，追加
+# nixlbench 与 etcd 栈（配方取自上游 contrib/Dockerfile.manylinux 的 el8 段、
+# 按 UCCL-only 适配）。只出轮子优先两步流程 contrib/build-wheels-uccl-cu12.sh；
+# 本文件用于"轮子与基准工具一次要齐"的整建。指令级修复须在产轮子的文件间
+# 同步（full_cuda12/uccl_engine_cuda12/manylinux_uccl_cuda12）。
 #
 # 关键约束与提速（2026-11-17 重构）：
 # - etcd/gRPC 栈绝不能被轮子构建看到：NIXL 核心探测到 etcd-cpp-api 会把它链
@@ -94,11 +93,12 @@ ENV CUDA_HOME=/usr/local/cuda \
 ENV PATH=/opt/rh/gcc-toolset-14/root/usr/bin:${PATH} \
     LD_LIBRARY_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH:-}
 
-# --- dnf 换源：华为云（AlmaLinux 全套 repo + EPEL），配方与 all_cuda12 逐字一致 ---------
-# 要点：baseurl 的 /almalinux/ 路径必须一并吃掉；epel.repo 只有 metalink、整文件
-# 重写为镜像源；grep 断言换源真的发生；powertools/CRB 兜底启用（boost-devel 在
-# CRB）；dnf.conf 并发 10 + timeout/minrate 掐涓流 + retries。层首尾 clean all，
-# 不做跨层元数据缓存（可复现性，详见 all_cuda12 注释）。
+# --- dnf 换源：华为云（AlmaLinux 全套 repo + EPEL） ---------------------------------------
+# 要点：sed 前置（首次元数据即走镜像）+ install 后幂等二跑；baseurl 的 /almalinux/
+# 路径必须一并吃掉；epel.repo 只有 metalink、整文件重写为镜像源；grep 断言换源
+# 真的发生；powertools/CRB 兜底启用（boost-devel 在 CRB）；dnf.conf 并发 10 +
+# timeout/minrate 掐断涓流 + retries。层首尾 clean all，不做跨层元数据缓存
+# （基座旧 zck 跨层增量属未定义行为，宁可每层全量拉）。
 RUN set -eux; \
     printf 'max_parallel_downloads=10\ntimeout=30\nminrate=10000\nretries=20\n' >> /etc/dnf/dnf.conf; \
     dnf clean all; \
@@ -396,7 +396,7 @@ RUN ok=0; \
     etcd --version | head -1 && \
     etcdctl version | head -1
 
-# --- 阶段四：NIXL 轮子（指令序列与 all_cuda12 逐字一致） ---------------------------------
+# --- 阶段四：NIXL 轮子 -------------------------------------------------------------------
 FROM $wheel_base AS wheel
 ENV http_proxy=$http_proxy
 ENV https_proxy=$https_proxy
