@@ -1,0 +1,505 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# NIXL manylinux 轮子构建容器：UCCL 传输后端（CUDA 12，引擎源码编译版）。
+# 前身为三引擎版 Dockerfile.manylinux_ucx_uccl_mooncake_cuda12（UCX+UCCL+
+# Mooncake），随 UCX 与 Mooncake 及其专属依赖（gdrcopy / hwloc / DOCA /
+# UCX 本体 / RDMA 栈）裁剪更名；现主要角色：为两步流程（contrib/build-
+# wheels-uccl-cu12.sh 步骤一）从源码编译含 libuccl_p2p 的 wheel_base 基座。
+#
+# 结构同官方 contrib/Dockerfile.manylinux（PyPI 发布轮子的构建定义）：CUDA
+# donor 把 toolkit 移植到 PyPA manylinux_2_28（AlmaLinux 8 / glibc 2.28）
+# 基座上，再用官方 contrib/build-wheel.sh 按 3.10-3.14 全矩阵产出与官方
+# 发布同平台 tag（manylinux_2_28）的自包含轮子。与官方的两点不同：
+# - CUDA donor 与官方 Dockerfile.manylinux 同为 el8/ubi8 味（12.4.1-devel-
+#   ubi8，见下方 ARG），匹配 AlmaLinux 基座；CUDA 大版本钉 12.4（理由见
+#   下方"CUDA 12 特有约束"）。manylinux 基座 tag（2026.06.06-1）与官方一致。
+# - 引擎集合钉住 UCCL 一个插件（本分支 meson.build 的 all_plugins 也只有
+#   'UCCL'——POSIX 插件已随 UCX/Mooncake 在 1.5.2-vacc 裁剪中一并移除，
+#   enable_plugins 填其他名字 meson 直接报错），只构建 UCCL 需要的依赖。
+#
+# 传输能力（UCCL 单引擎）：
+# RDMA：  UCCL 默认 RDMA 传输（ibverbs 库运行时 dlopen，目标机自备
+#         libibverbs/libefa 等 RDMA 用户态；头文件是编译期硬依赖，见下方
+#         dnf 层的 libibverbs-devel）；
+# NVLink：UCCL 的 CUDA-IPC 本地路径（节点内 GPU P2P）。
+#
+# CUDA 12 特有约束：nvcc 12.4 最高 sm_90（sm_100 要 12.8+），架构列表固定
+# 80,86,89,90（nixl_cuda_arch_list 的 "auto" 默认值 80..120 会构建失败）。
+# meta 轮子（nixl-*-py3-none-any.whl，对两个 CUDA 大版本通用）只在本 cu12
+# 构建产出，同官方 Dockerfile.manylinux 的 cu12/cu13 分工；与官方一致以
+# -Drelease_wheel=true 构建（meta 钉 nixl-cu12 与 nixl-cu13 两个依赖）。
+#
+# 网络（中国大陆环境）：dnf 走华为云镜像（AlmaLinux 全套 repo + EPEL），
+# uv/PyPI 走清华 TUNA 镜像；github 下载不稳时靠重试，不依赖代理。不装
+# torch（无 EP 扩展，构建轮子不需要）。基础镜像（quay.io 的 PyPA
+# manylinux 与 nvcr.io 的 CUDA donor）没有国内镜像，拉取慢属正常。
+#
+# 版本对齐：UCCL 引擎 commit 取自 NIXL v1.5.0 的 CI（.gitlab/build.sh）。
+#
+# 用法（在仓库根目录执行；推荐直接跑编排脚本 bash contrib/build-wheels-uccl-cu12.sh）：
+#   docker build -f contrib/Dockerfile.uccl_engine_cuda12 \
+#       -t nixl-wheel-base:uccl-cu12 --target wheel_base .    # 两步流程：只建基座
+#   docker build -f contrib/Dockerfile.uccl_engine_cuda12 -t nixl-wheels:cu12 .    # 或整建（基座+轮子一步）
+#   docker cp $(docker create nixl-wheels:cu12):/workspace/nixl/dist .
+# 可选：--build-arg WHL_PYTHON_VERSIONS=3.12 缩小矩阵（版本必须是镜像
+#   /opt/python 自带的，轮子层有 fail-fast 检查；--build-arg wheel_base=<已
+#   构建镜像> 可复用基座层，见官方 build-container.sh 的 --wheel-base-image）。
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG ARCH="x86_64"
+# CUDA toolkit donor：只 COPY 其 /usr/local/cuda。官方 manylinux 用 el8/ubi8
+# 味 donor 匹配 AlmaLinux 8 基座；ubuntu 味同样可行——CUDA 12.4 原生支持
+# RHEL 8，同一套 toolkit 二进制也打进 RHEL8 包，在 glibc 2.28 上可运行
+# （donor 的 OS 包一概不继承）。万一 nvcc 报 "GLIBC_2.xx not found"，
+# --build-arg BASE_IMAGE_TAG=12.4.1-devel-ubi8 换回 el8 味即可。
+ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
+ARG BASE_IMAGE_TAG="12.4.1-devel-ubuntu22.04"
+ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28"
+ARG MANYLINUX_IMAGE_TAG="2026.06.06-1"
+# 覆盖为某个已发布的 wheel_base 镜像 URL 时，跳过本地构建基座层（CI 缓存）。
+ARG wheel_base=wheel_base
+
+# --- 阶段一：CUDA donor（只取 toolkit） -------------------------------------------------
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS cuda
+
+# --- 阶段二：manylinux 构建基座（系统依赖 + UCCL 引擎） ---------------------------------
+FROM ${MANYLINUX_IMAGE}_${ARCH}:${MANYLINUX_IMAGE_TAG} AS wheel_base
+
+ARG ARCH="x86_64"
+ARG NPROC
+ARG DEFAULT_PYTHON_VERSION="3.12"
+ARG CUDA_VERSION="12.4"
+
+# --- 版本/路径（--build-arg 可覆盖） ----------------------------------------------------
+ARG UCCL_REPO="https://github.com/uccl-project/uccl.git"
+# NIXL v1.5.0 的 CI（.gitlab/build.sh）固定的 commit。该版插件用了变长通知
+# API（uccl_engine_send_notif_v / uccl_engine_get_notifs_v），旧的 0cdb740c
+# 引擎没有这些接口、编不过，不能回退。
+ARG UCCL_REF="da914a2054c29725464803e379bb3b98de90dfa1"
+
+# CUDA toolkit onto the manylinux base（同官方 Dockerfile.manylinux）。
+COPY --from=cuda /usr/local/cuda /usr/local/cuda
+RUN ln -sfn /usr/local/cuda /usr/local/cuda-${CUDA_VERSION}
+ENV CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}
+# el8 默认 gcc 8 太旧（UCCL 要 C++20），且 CUDA 需要 gcc <= 14——钉
+# gcc-toolset-14 到 PATH 前面（同官方 manylinux 镜像）。
+ENV PATH=/opt/rh/gcc-toolset-14/root/usr/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH:-}
+
+# --- dnf 换源：华为云（AlmaLinux 全套 repo + EPEL） ----------------------------------
+# AlmaLinux 的 sed 放在 dnf install 之前：首次元数据下载（BaseOS+AppStream
+# 一百多 MB）就走华为云，官方源国内拉一遍要一分多钟；install 之后再跑一遍
+# sed（幂等），兜住 almalinux-release-synergy 新增的 repo 文件。要点：
+# - repo.almalinux.org 的 baseurl 自带一段 /almalinux/ 路径，替换时必须一并
+#   吃掉，否则拼出 mirrors.huaweicloud.com/almalinux/almalinux/... 下层 404。
+# - EPEL：镜像自带的 epel.repo 只有 metalink 行、没有可解注释的 baseurl
+#   （实测 epel-release 8-22），sed 不可靠——直接整文件重写为镜像源；
+#   gpgkey 用 epel-release 装进来的密钥，testing/modular 用不到、删掉。
+#   2026-11-12 从阿里云换到华为云：阿里连接反复涓流式僵死；两家的
+#   /almalinux、/epel 路径结构完全相同，域名一处替换即可。
+# - grep 断言确认换源真的发生，否则下游只会报"从官方源下载失败"、难排查。
+# - powertools/CRB：almalinux-release-synergy 装上时会自行启用（日志打
+#   "CRB repo is enabled and named: powertools"），这里的级联只是兜底；
+#   enable 是纯本地操作，失败只可能是名字不存在——两种都试，都不在则终止。
+# - dnf.conf 四项：max_parallel_downloads=10（DNF4 默认并发 3，几十个 rpm
+#   提速明显）+ timeout=30/minrate=10000（低于 10KB/s 持续 30s 即掐断——
+#   阿里云上实测的"卡着不动"就是涓流连接永不超时）+ retries=20（掐断后
+#   自动重试，把僵死变成可控重传）。
+# - 层首先 dnf clean all 清掉 PyPA 基座自带的数月旧 /var/cache/dnf、层尾
+#   再 clean all：不做"保留元数据给下一层复用"（省 ~100MB 重拉）的捷径
+#   ——dnf 对基座旧 zck 做 zchunk 增量属未定义行为，跨层缓存也会让解析类
+#   故障不可复现。宁可每层全量拉，速度优化只留上面的并发+防僵死。
+#   勘误 2026-11-12：曾把 No match 归咎 zchunk 增量，后经全量重拉证伪
+#   （华为云 117MB BaseOS+34MB AppStream 拉满仍报）——真因是包名在 el8
+#   不存在，见下一层注释。
+RUN set -eux; \
+    printf 'max_parallel_downloads=10\ntimeout=30\nminrate=10000\nretries=20\n' >> /etc/dnf/dnf.conf; \
+    dnf clean all; \
+    sed -i -E \
+        -e 's|^mirrorlist=|#mirrorlist=|g' \
+        -e 's|^#*[[:space:]]*baseurl=https?://repo[.]almalinux[.]org/almalinux|baseurl=https://mirrors.huaweicloud.com/almalinux|g' \
+        /etc/yum.repos.d/almalinux*.repo; \
+    dnf install -y dnf-plugins-core almalinux-release-synergy epel-release; \
+    sed -i -E \
+        -e 's|^mirrorlist=|#mirrorlist=|g' \
+        -e 's|^#*[[:space:]]*baseurl=https?://repo[.]almalinux[.]org/almalinux|baseurl=https://mirrors.huaweicloud.com/almalinux|g' \
+        /etc/yum.repos.d/almalinux*.repo; \
+    printf '%s\n' \
+        '[epel]' \
+        'name=Extra Packages for Enterprise Linux 8 - $basearch' \
+        'baseurl=https://mirrors.huaweicloud.com/epel/8/Everything/$basearch/' \
+        'enabled=1' \
+        'gpgcheck=1' \
+        'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-8' \
+        > /etc/yum.repos.d/epel.repo; \
+    rm -f /etc/yum.repos.d/epel-testing.repo /etc/yum.repos.d/epel-testing-modular.repo \
+          /etc/yum.repos.d/epel-modular.repo; \
+    grep -q 'mirrors.huaweicloud.com/almalinux' /etc/yum.repos.d/almalinux*.repo; \
+    grep -q 'mirrors.huaweicloud.com/epel' /etc/yum.repos.d/epel.repo; \
+    dnf config-manager --set-enabled powertools \
+        || dnf config-manager --set-enabled crb \
+        || { echo 'ERROR: powertools/CRB repo not found'; exit 1; }; \
+    dnf clean all
+
+# UCCL p2p 的构建依赖：-lz -lelf；其 cxi 传输无条件编译、需要 libfabric
+# 公共头（仅编译期使用，运行时走 dlopen、不进 DT_NEEDED）；平台 python3
+# devel 供上游 Makefile 的 python3-config 探测（见 UCCL 层注释，显式装上
+# 而不靠某个包偶然拖进来）。curl 供下方 meson wrap 预下载层用。
+# 包名勘误（2026-11-12）：gcc-toolset-14-g++/libelf-devel 是 Fedora 41+/
+# RHEL10 时代的包名，el8 从未有过（全量元数据下照样 No match、与镜像站
+# 无关）；el8 正名 gcc-toolset-14-gcc-c++ / elfutils-libelf-devel。
+# UCX/Mooncake 及其专属依赖（DOCA/hwloc/gdrcopy、autotools 链、openssl/
+# numactl devel）已随引擎一并移除。勘误（2026-11-16，第五轮构建实证）：
+# 此前写"UCCL 的 ibverbs 构建期不需要"——对库成立（运行时 dlopen、不进
+# DT_NEEDED、不被 auditwheel vendor），对头文件不成立：上游 util/common.h
+# 第 5 行无条件 #include <infiniband/efadv.h>，engine/engine_api/util/
+# rdma/nccl 各 .cc 经 common.h 连带全灭。补 libibverbs-devel（el8 的
+# rdma-core 头件包，verbs.h 同包；拖进来的 libibverbs 运行库只留在构建
+# 容器，插件不 NEEDED 它、轮子形状不变）。
+RUN dnf install -y \
+    gcc-toolset-14 gcc-toolset-14-gcc-c++ \
+    make \
+    ccache \
+    git curl ca-certificates pkgconf-pkg-config \
+    python3-devel \
+    zlib-devel elfutils-libelf-devel libfabric-devel \
+    libibverbs-devel \
+    && dnf clean all && rm -rf /var/cache/dnf
+
+# --- Python 工具链（uv；主 venv 放 /workspace/.venv） -----------------------------------
+# 不用 `COPY --from=ghcr.io/astral-sh/uv:latest`：BuildKit 每次构建都要连
+# ghcr.io 解析镜像元数据（即使本层已缓存），国内直连经常 TLS 握手超时直接
+# 卡死构建。改从 PyPI 装 uv（自包含二进制 wheel，uv/uvx 入口都有）：用镜像
+# 自带的 cp 解释器的 pip（--prefix 让 uv 落进默认 PATH 的 /usr/local/bin），
+# -i 走 TUNA 镜像（uv 尚未就位，读不到 UV_DEFAULT_INDEX）。
+RUN PYS="cp$(echo ${DEFAULT_PYTHON_VERSION} | tr -d .)" && \
+    /opt/python/${PYS}-${PYS}/bin/python${DEFAULT_PYTHON_VERSION} -m pip install \
+        --no-cache-dir --prefix=/usr/local \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple uv
+
+ENV UV_CACHE_DIR=/workspace/.cache/uv
+RUN mkdir -p $UV_CACHE_DIR
+# 从 TUNA 拉构建工具时单连接偶发长时间停滞：放宽 uv 默认 30s 的 HTTP 超时、
+# 降低并发让每连接分到更多带宽。
+ENV UV_HTTP_TIMEOUT=600 \
+    UV_CONCURRENT_DOWNLOADS=8 \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+
+# manylinux 镜像的 python 都在 /opt/python/cpXY-cpXY 下且不在 PATH；软链进
+# /usr/local/bin，让 build-wheel.sh 里 uv venv --python 3.X 在 only-system
+# 偏好下解析到它们——全程零解释器下载（uv 默认会去 github 拉"托管"解释器，
+# 国内直连不稳）。
+RUN echo "bundled pythons: $(ls /opt/python | sort | tr '\n' ' ')" && \
+    for py in /opt/python/cp*/bin/python3.*; do \
+        [ -x "$py" ] || continue; \
+        ln -sf "$py" "/usr/local/bin/$(basename $py)"; \
+    done
+
+# 主 venv：原生 meson 构建与轮子层共用的工具。nanobind 为 UCCL p2p 的
+# python 扩展；auditwheel/tomlkit 是 build-wheel.sh 调用的。解释器取镜像
+# 自带的 cp312。
+RUN PYS="cp$(echo ${DEFAULT_PYTHON_VERSION} | tr -d .)" && \
+    uv venv /workspace/.venv --python /opt/python/${PYS}-${PYS}/bin/python${DEFAULT_PYTHON_VERSION} && \
+    uv pip install --python /workspace/.venv/bin/python --upgrade \
+    meson meson-python ninja pybind11 patchelf pyYAML click tabulate tomlkit \
+    auditwheel nanobind 'setuptools>=80.9.0' types-PyYAML
+ENV VIRTUAL_ENV=/workspace/.venv
+ENV PATH=/workspace/.venv/bin:${PATH}
+
+# --- UCCL P2P 引擎 ----------------------------------------------------------------------
+# libuccl_p2p.so + uccl_engine.h 装进 /usr/local，NIXL UCCL 插件通过
+# find_library('uccl_p2p') 解析（链接期靠 ld 内建搜索路径覆盖 /usr/local/lib）。
+# CUDA 只在构建时需要；toolkit 镜像把 driver-API stub 放在 lib64/stubs 下，
+# 软链到 Makefile 预期 -lcuda 的位置。各传输（ibverbs/efa/libfabric/nccl）
+# 运行时 dlopen；编译期头文件两处——ibverbs/efadv.h（libibverbs-devel）
+# 与 cxi 的 libfabric 头（libfabric-devel），均见前面 dnf 层。编译命令里的
+# -I/opt/amazon/efa、-I/opt/libfabric 指向容器中不存在的路径，无害：缺失的
+# -I 目录不报错，头文件经默认搜索路径从 /usr/include 解析。
+# 第四轮（2026-11-13）：libuccl_p2p.so 链接报 cannot find -lpython3.6。根因
+# 在上游 Makefile 的 PYTHON_LIB：从 python3-config --ldflags 的输出里 grep
+# 'python[0-9.]*' 提取库名——构建 venv（cp312）没有 python3-config，PATH
+# 落到 /usr/bin/python3-config（el8 平台 Python 3.6，还是 3.6m ABI 变体），
+# 正则把 m 后缀吃掉、拼出系统里不存在的 -lpython3.6；ubuntu 平台 Python 无
+# m 后缀，同款构建不炸。
+# 第六轮（2026-11-16，构建首次走到链接 + 上游源码核实）：efadv.h 修好后
+# readelf 保险丝触发。查上游 da914a2 源码：链接进 libuccl_p2p.so 的引擎
+# 核心 engine.cc 里 check_python_signals() 无条件引用 PyGILState_Ensure/
+# PyErr_CheckSignals（connect/accept/读写轮询循环里检查 Ctrl-C）——第四轮
+# "对象全是 C++、不引用任何 Python 符号"的判断是错的，符号引用真实存在，
+# --as-needed 语义上就该保留 libpython，软链+as-needed 组合其实修不到点上
+# （当时构建从未走到链接这步，无实证）。
+# 正确形态：让这两个符号保持未定义。Linux 上 Python 扩展一律不链接
+# libpython，Py* 符号由加载方进程（宿主解释器）经全局符号表解析；两者均为
+# 稳定 ABI 函数（3.2 起入 limited API），3.10–3.14 宿主通用。调用点仅在
+# in_python=true 时执行（NIXL 插件默认 true，见 src/plugins/uccl/
+# uccl_backend.cpp:73），那时宿主进程必然是 python 解释器。反之轮子 NEEDED
+# 上平台 3.6m 的 libpython 是致命的：目标机没有 + 跨版本错配。修法（替换
+# 第四轮三件套的前两件，断言保留）：
+# 1) make 命令行覆盖 PYTHON_LDFLAGS/PYTHON_LIB（GNU make 命令行变量压过
+#    Makefile 内的 := 赋值，并经 MAKEFLAGS 传给 install 的子 make）——把
+#    -lpython3.6m/-lpython3.6 从 libuccl_p2p.so 与 p2p.abi3.so 两条链接里
+#    整个拿掉（后者同理：扩展不链 libpython，符号由构建 venv 的解释器
+#    解析；它只装进 venv 供自测、不进轮子）。保留 PYTHON_LDFLAGS 里非
+#    python 的尾巴 -lpthread -ldl -lutil -lm。第四轮为让 -lpython3.6 过
+#    链接造的 /usr/lib64/libpython3.6.so 软链随之作废、连同存在性断言
+#    一并删除；python3-devel 留在 dnf 层不动（Makefile 解析期仍调用
+#    python3-config，删它只会作废 dnf 缓存层）。
+# 2) make CXX="g++ -Wl,--as-needed" 保留：其余未引用的库（libutil/libz/
+#    libelf）不进 DT_NEEDED。-Wl 在 -c 编译阶段被 gcc 驱动丢弃、无副作用。
+# 3) install 后 readelf 断言 DT_NEEDED 不含 libpython（失败时先打印匹配行
+#    自证）——上游 Makefile 行为漂移（如变量改名致覆盖失效）时在此层报错，
+#    而不是把带平台 libpython 的坏轮子发出去。
+# 随 UCX/Mooncake 精简新增（2026-11-16）：el8 的 ldconfig 默认不含
+# /usr/local/lib（RHEL 系没有 Debian 那样的 usr-local-lib.conf）——注册之，
+# 否则轮子层 auditwheel repair 解析不到 libuccl_p2p.so.1（vendor 进
+# nixl_cu12.libs/ 失败），容器内运行期 dlopen 系统插件同样靠 ldconfig
+# 缓存兜底。
+RUN [ -e /usr/local/cuda/lib64/libcuda.so ] || \
+        ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so; \
+    cd /tmp && \
+    for i in 1 2 3 4 5; do \
+        rm -rf uccl && git clone ${UCCL_REPO} uccl && break; \
+        echo "=== uccl clone attempt $i failed, retrying in 10s ==="; sleep 10; \
+    done && \
+    test -d uccl/.git && \
+    cd uccl && git checkout ${UCCL_REF} && \
+    cd p2p && \
+    make -j${NPROC:-$(nproc)} CXX="g++ -Wl,--as-needed" \
+        PYTHON_LDFLAGS="-lpthread -ldl -lutil -lm" PYTHON_LIB= && \
+    make install CXX="g++ -Wl,--as-needed" \
+        PYTHON_LDFLAGS="-lpthread -ldl -lutil -lm" PYTHON_LIB= && \
+    test -f /usr/local/lib/libuccl_p2p.so && \
+    if readelf -d /usr/local/lib/libuccl_p2p.so | grep libpython; then \
+        echo 'ERROR: libuccl_p2p.so 的 DT_NEEDED 仍含 libpython（PYTHON_LDFLAGS/PYTHON_LIB 覆盖失效？）'; \
+        exit 1; \
+    fi && \
+    echo /usr/local/lib > /etc/ld.so.conf.d/uccl-p2p.conf && \
+    ldconfig && \
+    cd /tmp && rm -rf uccl
+
+# 第七轮（2026-11-16，meson 层首通实证）：meson setup 报 "Compiler nvcc
+# cannot compile programs"。根因是宿主编译器组合：官方 contrib/
+# Dockerfile.manylinux 的 donor 是 CUDA 13.4（GCC 14 自 CUDA 12.8 起受
+# 支持），gcc-toolset-14 前置 PATH 没问题；本镜像把 CUDA 钉在 12.4（sm_90
+# 上限），nvcc 12.4 的宿主编译器只支持到 GCC 13.2——PATH 上的 gcc 解析到
+# gcc-toolset-14（gcc 14.2.1），cudafe 直接 #error 拒绝。修法：在 PATH 里
+# 唯一先于 /usr/local/cuda/bin 的位置（venv bin）放 nvcc 包装脚本，把宿主
+# 编译器钉到 12.4 支持范围内的 gcc——优先 gcc-toolset-12（manylinux_2_28
+# 基座自带，12.2 且 C++20 完整），退回 /usr/bin/gcc（el8 系统 8.5），
+# 两者皆无则本层报错。层内先用空 kernel 冒烟编译（等价于 meson sanity），
+# 失败暴露在本层而非 meson 深处。本分支 src/ 无任何 .cu（CUDA 语言只剩
+# gencode/abi 装配与版本探测），ccbin 只服务 sanity 与后续潜在 .cu。
+# UCCL/dnf 层内容零改动，缓存链不断。
+# 第八轮（2026-11-16 续，本层冒烟自证）：冒烟报 gcc: error trying to exec
+# 'cc1plus'——manylinux_2_28 基座只装了 gcc-toolset-12 的 C 件（gcc 驱动
+# 在、cc1plus 不在），nvcc 预处理宿主属性（-E -x c++）第一步就要 C++
+# 前端。本层开头补 gcc-toolset-12-gcc-c++（层内 dnf：既装且证，主 dnf
+# 层缓存不动）。
+RUN dnf install -y gcc-toolset-12-gcc-c++ \
+    && dnf clean all && rm -rf /var/cache/dnf && \
+    if [ -x /opt/rh/gcc-toolset-12/root/usr/bin/gcc ]; then \
+        CCBIN=/opt/rh/gcc-toolset-12/root/usr/bin/gcc; \
+    elif [ -x /usr/bin/gcc ]; then \
+        CCBIN=/usr/bin/gcc; \
+    else \
+        echo 'ERROR: 找不到 CUDA 12.4 可用的宿主 gcc（gcc-toolset-12 或系统 gcc）'; \
+        exit 1; \
+    fi && \
+    printf '#!/bin/sh\nexec /usr/local/cuda/bin/nvcc -ccbin %s "$@"\n' "$CCBIN" \
+        > /workspace/.venv/bin/nvcc && \
+    chmod +x /workspace/.venv/bin/nvcc && \
+    printf '__global__ void smoke() {}\n' > /tmp/nvcc_smoke.cu && \
+    nvcc -c /tmp/nvcc_smoke.cu -o /tmp/nvcc_smoke.o && \
+    rm -f /tmp/nvcc_smoke.cu /tmp/nvcc_smoke.o && \
+    echo "nvcc wrapper OK (ccbin=$CCBIN)"
+
+WORKDIR /workspace
+
+# --- 阶段三：NIXL 轮子 ------------------------------------------------------------------
+FROM $wheel_base AS wheel
+
+ARG ARCH="x86_64"
+ARG NPROC
+ARG DEFAULT_PYTHON_VERSION="3.12"
+ARG NIXL_PLUGINS="UCCL"
+ARG NIXL_PREFIX="/usr/local/nixl"
+# el8 的 64 位库在 lib64（非 ubuntu 的 lib/<arch>-linux-gnu）。
+ARG NIXL_PLUGIN_DIR="${NIXL_PREFIX}/lib64/plugins"
+# nvcc 12.4 最高 sm_90；"auto"（80..120）会构建失败。
+ARG CUDA_ARCH_LIST="80,86,89,90"
+
+WORKDIR /workspace/nixl
+# 分层 COPY 代替整仓 COPY .：只有这些文件变化才重跑下面的 meson/轮子层。
+# pyproject.toml 的 readme/license-files 强制要求 README.md 与 LICENSE 存在
+# （本分支 license-files 只有根 LICENSE，licenses/ 目录已随裁剪删除）；
+# subprojects/ 的 .wrap 供 meson 拉取子项目依赖（见下方预下载层）。
+COPY meson.build meson_options.txt pyproject.toml README.md LICENSE ./
+COPY subprojects ./subprojects
+# meson setup 会按 subprojects/*.wrap 联网解析子项目。本分支只剩三个 wrap：
+# abseil-cpp（tarball + patch zip，核心库的 subproject 回退）、asio
+# （tarball + patch zip——核心 utils required asio，系统无 asio 包、必须走
+# wrap 回退）与 tomlplusplus（tarball，无 patch）。国内直连 github 偶发
+# 断流，而这些下载原本发生在下面的 meson setup 层——NIXL 源码每改一次
+# 就要重新下载一遍。这里提前一层全部落到 subprojects/packagecache/
+# （meson 优先读缓存且会校验哈希，命中即完全跳过下载）。URL 用 wrapdb
+# release 的官方再托管而非 github /archive（后者会按需重新打包、哈希不稳
+# 定）。本层紧跟 COPY subprojects：.wrap 不变则永久缓存，.wrap 一变自动
+# 重跑。显式 ok 标志各重试 5 次；仍失败则报错退出，网络恢复后单独重跑本层
+# 即可（后续层全部命中缓存）。注意：升级 .wrap 时需同步更新本层的 URL/
+# 哈希。（上游的 taskflow/liburing wrap 已随 UCX 裁剪删除，本分支没有。）
+RUN mkdir -p subprojects/packagecache && cd subprojects/packagecache && \
+    for spec in \
+      "https://github.com/mesonbuild/wrapdb/releases/download/abseil-cpp_20250814.1-1/abseil-cpp-20250814.1.tar.gz|abseil-cpp-20250814.1.tar.gz|1692f77d1739bacf3f94337188b78583cf09bab7e420d2dc6c5605a4f86785a1" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/abseil-cpp_20250814.1-1/abseil-cpp_20250814.1-1_patch.zip|abseil-cpp_20250814.1-1_patch.zip|f44ad4d72ff2919a6a48cf0887f69aef34c338bfdd8931153596e3766d75f654" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/asio_1.30.2-2/asio-1.30.2.tar.gz|asio-1.30.2.tar.gz|12e7bb4dada8bc1191de9d550a59ee658ce4e645ffc97c911c099ab4e8699d55" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/asio_1.30.2-2/asio_1.30.2-2_patch.zip|asio_1.30.2-2_patch.zip|8bed3693016874b097e4d902c4ca8daf1b6abf1b5a56b0c5c02827d4e0747ddb" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/tomlplusplus_3.4.0-1/tomlplusplus-3.4.0.tar.gz|tomlplusplus-3.4.0.tar.gz|8517f65938a4faae9ccf8ebb36631a38c1cadfb5efa85d9a72e15b9e97d25155" \
+    ; do \
+      url="${spec%%|*}"; rest="${spec#*|}"; out="${rest%%|*}"; want="${rest#*|}"; ok=0; \
+      for i in 1 2 3 4 5; do \
+        curl -fsSL --connect-timeout 15 -o "$out" "$url" && { ok=1; break; }; \
+        echo "重试 $i/5：$out（github 直连偶发断流）"; sleep 3; \
+      done; \
+      [ "$ok" = 1 ] || { echo "ERROR: 下载失败 $url"; exit 1; }; \
+      echo "$want  $out" | sha256sum -c - || exit 1; \
+    done
+COPY contrib/tomlutil.py ./contrib/
+COPY src ./src
+
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib64:${LD_LIBRARY_PATH}
+
+# --wrap-mode=nodownload：setup 层零联网——三个 wrap 已在 packagecache。
+# -Drelease_wheel=true 与官方一致：meta 轮子钉 nixl-cu12 与 nixl-cu13 两个
+# 依赖（meta 只随 cu12 产出，见轮子层）。（本分支 meson 选项表没有
+# ucx_path/build_tests/build_examples/build_docs/rust，这些 -D 一个都不能
+# 带——meson 对未知选项直接报错。）
+# 2026-11-17（四文件同步）：ccache 走 BuildKit cache mount——原生构建与轮子矩阵
+# 重复编译的核心库/wrap abseil 缓存复用，同编译器同输入产物 bit 级不变、不进
+# 镜像层；需 BuildKit（docker 23+ 默认，旧版 export DOCKER_BUILDKIT=1）。
+RUN --mount=type=cache,target=/workspace/.cache/ccache \
+    export CCACHE_DIR=/workspace/.cache/ccache CC='ccache gcc' CXX='ccache g++' && \
+    ccache -M 20G && \
+    rm -rf build && \
+    meson setup build \
+        --prefix=${NIXL_PREFIX} \
+        --buildtype=release \
+        --wrap-mode=nodownload \
+        -Dnixl_cuda_arch_list=${CUDA_ARCH_LIST} \
+        -Denable_plugins=${NIXL_PLUGINS} \
+        -Drelease_wheel=true && \
+    ninja -j${NPROC:-$(nproc)} -C build && \
+    ninja -j${NPROC:-$(nproc)} -C build install && \
+    echo "${NIXL_PREFIX}/lib64" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "${NIXL_PLUGIN_DIR}" >> /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig && \
+    ls ${NIXL_PLUGIN_DIR} | grep -q "libplugin_UCCL.so" || \
+        { echo "ERROR: missing plugin UCCL"; exit 1; }
+
+# 官方轮子构建脚本单独一层 COPY：只有 build-wheel.sh（或其上层）变化时才重跑
+# 下面的轮子层，不牵连前面的原生 meson 构建。
+COPY contrib/build-wheel.sh ./contrib/
+
+# Python 绑定轮子：直接调用官方 contrib/build-wheel.sh，按 3.10-3.14 全矩阵
+# 产出 manylinux_2_28 平台 tag 的自包含轮子——与官方 PyPI 发布同款 tag。
+# 流程：脚本按 nvcc 报告的 CUDA 大版本定名 nixl-cu12（内部调 tomlutil.py
+# 改写 pyproject.toml），为每个 Python 版本建一次性 venv（/workspace/venv-
+# pyXXX，用后即删）跑 uv build 出裸轮子（NIXL 本体 + UCCL 插件），
+# auditwheel repair 把插件 DT_NEEDED 的引擎库（libuccl_p2p 及传递依赖）
+# vendor 进 nixl_cu12.libs/ 并把 rpath 指到轮子内部。
+# 注意：本分支的 build-wheel.sh 已没有上游的 --ucx-plugins-dir/
+# --nixl-plugins-dir 参数与 wheel_add_ucx_plugins.py 后处理（UCX 随分支裁剪
+# 删除）——照搬上游调用方式会报 Unknown argument 直接失败。
+# 对脚本（镜像内副本，仓库文件不动）的三处 sed 适配：
+# 1) setup 选项注入：官方镜像依赖齐备、enable_plugins 留空即全量自动探测；
+#    这里必须显式钉住插件/架构列表（nvcc 12.4 只到 sm_90）。MESON_ARGS
+#    环境变量经 uv build 实测不生效，故用 printf+sed 把 -Csetup-args=...
+#    追加进 BUILD_ARGS 数组（uv build 的 --config-settings 等价形式）。
+#    --wrap-mode=nodownload 一并注入：meson-python 内部本就按 nodownload
+#    构建，显式补一份保险，行为不随工具链版本漂移。
+# 2) AUDITWHEEL_EXCLUDES 追加 --exclude libpython*：libuccl_p2p.so 已按
+#    UCCL 层的 PYTHON_LDFLAGS 覆盖构建、不链 libpython，此 exclude 是保险丝——上游
+#    Makefile 行为漂移把 libpython 带回 DT_NEEDED 时，宁可留 external 也
+#    不 vendor：vendor 进轮子会与目标机静态链接 libpython 的解释器
+#    （python.org 安装包）冲突；conda/系统 python 自带共享 libpython、
+#    不受影响。
+# 3) UV_PYTHON_PREFERENCE=only-system：uv 默认会去 github 拉"托管"解释器
+#    （国内直连不稳），配合前面软链的 /usr/local/bin/python3.X 全程零下载；
+#    层开头对请求的每个版本 fail-fast。
+# 未启用 --build-nixl-ep（需按 torch 版本逐个装 torch；本镜像不装 torch）。
+# 目标机仍需自备（均在 exclude 列表或 repair 之外）：libcuda 驱动库与
+# cuFile（CUDA 运行时栈），以及 libibverbs/libefa 等 RDMA 用户态（UCCL
+# ibverbs 传输运行时 dlopen 的依赖）。meta 轮子由上面原生 meson 构建生成、
+# 只随 cu12 产出（cuda13 版不重复，同官方分工）。
+# 第九轮（2026-11-16，exec bit）：./contrib/build-wheel.sh Permission
+# denied。Windows 检出 git core.filemode=false，文件不带 +x，COPY 原样带进
+# 镜像（官方 CI 在 Linux 检出上构建，无此问题）。两处直呼都要补：build-
+# wheel.sh（本层调用）与 tomlutil.py（脚本内 ./contrib/tomlutil.py 直呼，
+# 自带 shebang；其余调用均经 source/venv 二进制，不受影响）。用本层 chmod
+# 而非 COPY --chmod=755：tomlutil.py 的 COPY 层在原生 meson 层之前，改它
+# 会连带重编整条原生链；chmod 只重跑本层，前面全部缓存保留。
+# 第十轮（2026-11-16，numpy）：冒烟 python -c "import nixl" 报
+# ModuleNotFoundError: numpy——生成的 _api.py 顶层 import numpy as np（模块
+# 级硬依赖），--no-deps 装轮不带它，import 必挂。轮子安装前先装 numpy
+# （TUNA，cp312 manylinux 轮约 20MB；pyproject 无版本约束，取最新即可）。
+# torch 仍不装：_is_torch_tensor 只查 sys.modules（惰性探测），import 不需要。
+ARG WHL_PYTHON_VERSIONS="3.10,3.11,3.12,3.13,3.14"
+ARG UV_PYTHON_PREFERENCE="only-system"
+# 2026-11-17（四文件同步）：ccache + uv 双 cache mount（uv 缓存命中每版本的
+# BUILD_DEPS/numpy 下载；CC/CXX 经 meson-python 传递，产物不变）。
+RUN --mount=type=cache,target=/workspace/.cache/ccache \
+    --mount=type=cache,target=/workspace/.cache/uv \
+    export CCACHE_DIR=/workspace/.cache/ccache CC='ccache gcc' CXX='ccache g++' && \
+    for PYVER in $(echo ${WHL_PYTHON_VERSIONS} | tr ',' ' '); do \
+        command -v python${PYVER} >/dev/null || \
+            { echo "ERROR: python${PYVER} not on PATH (must be one of the manylinux-bundled /opt/python versions)"; exit 1; }; \
+    done && \
+    chmod +x contrib/build-wheel.sh contrib/tomlutil.py && \
+    printf '        %s\n' \
+        "-Csetup-args=--wrap-mode=nodownload" \
+        "-Csetup-args=-Dnixl_cuda_arch_list=${CUDA_ARCH_LIST}" \
+        "-Csetup-args=-Denable_plugins=${NIXL_PLUGINS}" \
+        > /tmp/wheel_setup_args && \
+    sed -i '/--no-build-isolation/r /tmp/wheel_setup_args' contrib/build-wheel.sh && \
+    grep -q -- "-Csetup-args=-Denable_plugins=${NIXL_PLUGINS}" contrib/build-wheel.sh && \
+    rm -f /tmp/wheel_setup_args && \
+    sed -i 's/ --exclude liblz4\*/ --exclude liblz4* --exclude libpython*/' contrib/build-wheel.sh && \
+    grep -q 'exclude libpython' contrib/build-wheel.sh && \
+    export UV_PYTHON_PREFERENCE=${UV_PYTHON_PREFERENCE} && \
+    rm -rf dist && mkdir -p dist && \
+    for PYVER in $(echo ${WHL_PYTHON_VERSIONS} | tr ',' ' '); do \
+        ./contrib/build-wheel.sh \
+            --python-version ${PYVER} \
+            --platform manylinux_2_28_${ARCH} \
+            --output-dir dist || exit 1; \
+    done && \
+    cp build/src/bindings/python/nixl-meta/nixl-*.whl dist/ && \
+    CP_TAG="cp$(echo ${DEFAULT_PYTHON_VERSION} | tr -d .)" && \
+    uv pip install numpy && \
+    uv pip install --no-deps dist/nixl_cu*-${CP_TAG}-*.whl dist/nixl-*.whl && \
+    python${DEFAULT_PYTHON_VERSION} -c "import nixl" && \
+    python -c "import glob,zipfile; names=zipfile.ZipFile(glob.glob('dist/nixl_cu*-${CP_TAG}-*.whl')[0]).namelist(); assert any(n.startswith('nixl_cu') and '/_bindings' in n for n in names), 'bindings module missing'; print('wheel OK,', len(names), 'entries; uccl entries:', sum('uccl' in n.lower() for n in names))"
+# 冒烟安装：numpy 先单独装（import 时硬依赖，见第十轮注释），轮子本体仍
+# --no-deps（不拉 torch，让依赖留给目标机按需解决）。
+
+ENV NIXL_PLUGIN_DIR=${NIXL_PLUGIN_DIR}
+
+# 构建产物在 /workspace/nixl/dist：nixl_cu12-*-cp310..cp314-*
+# manylinux_2_28_x86_64.whl + meta 轮子 nixl-*-py3-none-any.whl。
+LABEL org.opencontainers.image.title="nixl manylinux wheels (UCCL, CUDA 12)"
+LABEL org.opencontainers.image.description="Build container producing manylinux_2_28 nixl-cu12 wheels with the UCCL transfer backend"
