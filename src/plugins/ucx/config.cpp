@@ -16,12 +16,41 @@
  */
 #include "config.h"
 
+#include <algorithm>
+#include <array>
+#include <mutex>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+
+extern "C" {
+#include <ucs/config/global_opts.h>
+}
 
 #include "common/configuration.h"
+#include "common/hw_info.h"
 #include "common/nixl_log.h"
 
+namespace {
+
+bool
+tlsEnablesCudaSupport(std::string_view tls) {
+    const bool deny_list = !tls.empty() && tls.front() == '^';
+    if (deny_list) {
+        tls.remove_prefix(1);
+    }
+
+    const std::string tokens = "," + std::string(tls) + ",";
+    const bool has_cuda_support =
+        std::ranges::any_of(std::array{",all,", ",cuda,", ",cuda_copy,", ",\\cuda_copy,"},
+                            [&](auto token) { return tokens.find(token) != std::string::npos; });
+    return deny_list ? !has_cuda_support : has_cuda_support;
+}
+
+} // namespace
+
 namespace nixl::ucx {
+
 void
 config::modify(std::string_view key, std::string_view value) const {
     const auto ucx_key = "UCX_" + std::string(key);
@@ -47,8 +76,36 @@ config::modifyAlways(std::string_view key, std::string_view value) const {
     }
 }
 
+void
+config::validateTlsCudaSupport() const {
+    const auto tls = nixl::config::getValueOptional<std::string>("UCX_TLS");
+    if (nixl::hwInfo::instance().numNvidiaGpus == 0 || !tls || tlsEnablesCudaSupport(*tls)) {
+        return;
+    }
+
+    const std::string error = "Invalid UCX_TLS=" + *tls +
+        " for NIXL UCX backend: NVIDIA GPU(s) are present, "
+        "but this setting does not enable CUDA memory support. Add cuda_copy for "
+        "basic GPU support, or cuda to also include NVLink support.";
+    NIXL_ERROR << error;
+    throw std::runtime_error(error);
+}
+
 ucp_config_t *
 config::readUcpConfig() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (nixl::hwInfo::instance().numEfaDevices == 0 &&
+            !nixl::config::internal::getenvOptional("UCX_MODULES")) {
+            const auto mod_status = ucs_global_opts_set_value("MODULES", "^efa");
+            if (mod_status != UCS_OK) {
+                NIXL_DEBUG << "Failed to set UCX MODULES=^efa: " << ucs_status_string(mod_status);
+            } else {
+                NIXL_DEBUG << "No EFA devices detected; set UCX MODULES=^efa";
+            }
+        }
+    });
+
     ucp_config_t *config = nullptr;
     const auto status = ucp_config_read(nullptr, nullptr, &config);
     if (status != UCS_OK) {

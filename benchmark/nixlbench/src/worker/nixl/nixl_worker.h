@@ -27,7 +27,9 @@
 #include <optional>
 #include <memory>
 #include <unistd.h>
+#include <functional>
 #include <nixl.h>
+#include <nixl_types.h>
 #include "utils/utils.h"
 #include "worker/worker.h"
 #include <random>
@@ -43,7 +45,12 @@ class xferBenchNixlWorker: public xferBenchWorker {
         std::vector<xferFileState> remote_fds;
         std::vector<NixlMemRegion> remote_regs_;
         std::vector<NixlMemRegion> local_regs_;
+        // DOCA_MEMOS uses raw IOV lists (not NixlMemRegion) because the OBJ_SEG
+        // cleanup path would call rmObj, which DOCA_MEMOS does not support.
+        std::vector<std::vector<xferBenchIOV>> remote_iovs;
         std::vector<GusliDeviceConfig> gusli_devices;
+        std::string remote_agent_name;
+        std::optional<xferBenchIOV> completion_counter_iov;
 
     public:
         explicit xferBenchNixlWorker(const std::vector<std::string> &devices);
@@ -84,6 +91,19 @@ class xferBenchNixlWorker: public xferBenchWorker {
         ensureFileHasConsistencyData(const GusliDeviceConfig &device, size_t size);
         uint64_t
         getFileOffset(size_t current_offset, size_t max_offset_in_blocks, size_t block_size);
+        void
+        releaseMemView(nixlMemViewH &mvh);
+        nixlMemViewH
+        prepareGPULocalView(const std::vector<std::vector<xferBenchIOV>> &local_iov_lists);
+        nixlMemViewH
+        prepareGPURemoteView(const std::vector<std::vector<xferBenchIOV>> &remote_iov_lists);
+        std::optional<xferBenchIOV>
+        initCompletionCounterVram();
+        bool
+        waitForDeviceCompletionCounter(const xferBenchIOV &counter_iov,
+                                       uint64_t expected_value,
+                                       const char *phase,
+                                       const std::function<void()> &checkLiveness);
 
         std::mt19937_64 default_rng_;
 };

@@ -23,6 +23,13 @@ set -e
 set -x
 set -o pipefail
 
+# Force CMake to always copy files in install directives, rather than skip based on file modification timestamp.
+# File modification timestamp check in CMake uses 1 second resolution.
+# This causes problems for fast builds that install, patch then reinstall the same file, as the final install step
+# may be incorrectly skipped.
+# Seen in CI as flaky ASAN failure due to inconsistent Azure SDK headers causing memory corruption.
+export CMAKE_INSTALL_ALWAYS=1
+
 # Parse commandline arguments with first argument being the install directory
 # and second argument being the UCX installation directory.
 # Source dependency options grouped with dep download/build/install steps.
@@ -203,7 +210,7 @@ else
 # Rust
     wget --tries=3 --waitretry=5 https://static.rust-lang.org/rustup/dist/${ARCH}-unknown-linux-gnu/rustup-init -O ${TMPDIR}/rustup-init
     chmod +x ${TMPDIR}/rustup-init
-    ${TMPDIR}/rustup-init -y --default-toolchain 1.86.0
+    ${TMPDIR}/rustup-init -y --default-toolchain 1.95.0
 # Astral
     wget --tries=3 --waitretry=5 "https://astral.sh/uv/install.sh" -O ${TMPDIR}/install_uv.sh
     chmod +x ${TMPDIR}/install_uv.sh
@@ -335,16 +342,17 @@ else
         $SUDO rm -rf gusli
     )
 # Mookcake
-    MOONCAKE_VERSION="${MOONCAKE_VERSION:-v0.3.10.post1}"
+    MOONCAKE_VERSION="${MOONCAKE_VERSION:-v0.3.14}"
     ( \
         cd ${TMPDIR} && \
         echo "MOONCAKE_VERSION: ${MOONCAKE_VERSION}" && \
         git clone --depth 1 --branch "${MOONCAKE_VERSION}" https://github.com/kvcache-ai/Mooncake.git && \
         cd Mooncake && \
         sed -i '/liburing-dev/d' dependencies.sh && \
+        sed -i 's/^\([[:space:]]*\)install_go$/\1true/' dependencies.sh && \
         $SUDO bash dependencies.sh -y && \
         mkdir build && cd build && \
-        cmake .. -DBUILD_SHARED_LIBS=ON -DWITH_STORE=OFF -G Ninja && \
+        cmake .. -DBUILD_SHARED_LIBS=ON -DWITH_STORE=OFF -DWITH_STORE_RUST=OFF -DUSE_HIP=ON -DBUILD_UNIT_TESTS=OFF -G Ninja && \
         ninja -j"$NPROC" && \
         $SUDO ninja install && \
         $SUDO ldconfig && \
@@ -380,7 +388,7 @@ if [ -n "$PRE_INSTALLED_UCX_ENV" ]; then
 else
     # UCCL is skipped if no Nvidia GPU is present.
     # Skipping steps entirely for ROCm.
-    UCX_VERSION=${UCX_VERSION:-v1.21.x}
+    UCX_VERSION=${UCX_VERSION:-v1.23.x}
     git clone --depth 1 --branch "${UCX_VERSION}" https://github.com/openucx/ucx.git ${TMPDIR}/ucx
     ( \
         cd ${TMPDIR}/ucx && \
@@ -391,6 +399,7 @@ else
             --disable-static \
             --disable-doxygen-doc \
             --enable-optimizations \
+            --without-avx \
             --enable-cma \
             --enable-devel-headers \
             --with-verbs \
@@ -422,6 +431,7 @@ else
         ${NIXL_BUILD_DIR} \
         --prefix=${INSTALL_DIR} \
         -Ducx_path=${UCX_INSTALL_DIR} \
+        -Dwheel_variant=rocm \
         -Dbuild_docs=false \
         -Drust=false \
         ${EXTRA_BUILD_ARGS} \

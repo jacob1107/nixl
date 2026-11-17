@@ -17,6 +17,7 @@
 #include "doca_exporter.h"
 #include "common/configuration.h"
 #include "common/exception.h"
+#include "common/hostname.h"
 #include "common/nixl_log.h"
 #include "common/str_util.h"
 #include "histogram_buckets.h"
@@ -51,8 +52,11 @@ const char docaPrometheusPortVar[] = "NIXL_TELEMETRY_DOCA_PROMETHEUS_PORT";
 const char docaPrometheusLocalVar[] = "NIXL_TELEMETRY_DOCA_PROMETHEUS_LOCAL";
 const char docaBackendsVar[] = "NIXL_TELEMETRY_DOCA_BACKENDS";
 const char docaIpcSocketsDirVar[] = "NIXL_TELEMETRY_DOCA_IPC_SOCKETS_DIR";
+const char docaSourceIdVar[] = "NIXL_TELEMETRY_DOCA_SOURCE_ID";
+const char docaSourceTagVar[] = "NIXL_TELEMETRY_DOCA_SOURCE_TAG";
 const char docaBackendScrape[] = "scrape";
 const char docaBackendIpc[] = "ipc";
+const char docaDefaultSourceTag[] = "nixl";
 
 const std::string docaExporterLocalAddress = "http://127.0.0.1";
 const std::string docaExporterPublicAddress = "http://0.0.0.0";
@@ -71,11 +75,23 @@ struct DocaExporterConfig {
     bool ipc = false;
     std::string bind_address;
     std::string ipc_sockets_dir;
+    std::string hostname;
+    std::string source_id;
+    std::string source_tag;
 };
 
 [[nodiscard]] std::string
 getIpcSocketsDir() {
     return nixl::config::getValueDefaulted<std::string>(docaIpcSocketsDirVar, std::string());
+}
+
+[[nodiscard]] std::string
+getSourceAttribute(const char *var, const std::string &fallback) {
+    const std::string value = nixl::config::getValueDefaulted<std::string>(var, fallback);
+    if (value.find('/') != std::string::npos) {
+        nixl::throwRuntimeError(var, ": '", value, "' must not contain '/'");
+    }
+    return value;
 }
 
 [[nodiscard]] DocaExporterConfig
@@ -104,17 +120,10 @@ parseExporterConfig() {
     }
     config.bind_address = getBindAddress();
     config.ipc_sockets_dir = getIpcSocketsDir();
+    config.hostname = nixl::getHostname().value_or("unknown");
+    config.source_id = getSourceAttribute(docaSourceIdVar, config.hostname);
+    config.source_tag = getSourceAttribute(docaSourceTagVar, docaDefaultSourceTag);
     return config;
-}
-
-[[nodiscard]] std::string
-getHostname() {
-    std::array<char, HOST_NAME_MAX + 1> hostname{};
-    if (gethostname(hostname.data(), hostname.size()) == 0) {
-        hostname.back() = '\0';
-        return std::string(hostname.data());
-    }
-    return "unknown";
 }
 
 [[nodiscard]] uint64_t
@@ -152,6 +161,8 @@ struct DocaSharedContext {
     bool metrics_context_created = false;
     const bool scrape_enabled;
     const bool ipc_enabled;
+    const std::string source_id;
+    const std::string source_tag;
     std::string backend_desc;
 
     // Base histograms are templates created once on the shared source; observing
@@ -177,8 +188,10 @@ private:
 
 DocaSharedContext::DocaSharedContext(const DocaExporterConfig &config)
     : scrape_enabled(config.scrape),
-      ipc_enabled(config.ipc) {
-    const std::string hostname = getHostname();
+      ipc_enabled(config.ipc),
+      source_id(config.source_id),
+      source_tag(config.source_tag) {
+    const std::string &hostname = config.hostname;
     const std::string &bind_address = config.bind_address;
     const std::string &ipc_sockets_dir = config.ipc_sockets_dir;
 
@@ -222,12 +235,13 @@ DocaSharedContext::DocaSharedContext(const DocaExporterConfig &config)
             throw std::runtime_error("Failed to create DOCA source");
         }
 
-        doca_telemetry_exporter_source_set_id(source, "nixl");
-        doca_telemetry_exporter_source_set_tag(source, "nixl");
+        doca_telemetry_exporter_source_set_id(source, source_id.c_str());
+        doca_telemetry_exporter_source_set_tag(source, source_tag.c_str());
 
         result = doca_telemetry_exporter_source_start(source);
         if (result != DOCA_SUCCESS) {
-            throw std::runtime_error("Failed to start DOCA source");
+            nixl::throwRuntimeError(
+                "Failed to start DOCA source (id '", source_id, "', tag '", source_tag, "')");
         }
         source_started = true;
 
@@ -336,7 +350,8 @@ nixlTelemetryDocaExporter::nixlTelemetryDocaExporter(
     if (!ctx_) {
         ctx_ = std::make_shared<DocaSharedContext>(config);
         g_ctx_weak = ctx_;
-        NIXL_INFO << "DOCA Telemetry exporter initialized (" << ctx_->backend_desc << ")";
+        NIXL_INFO << "DOCA Telemetry exporter initialized (" << ctx_->backend_desc
+                  << "; source id '" << ctx_->source_id << "', tag '" << ctx_->source_tag << "')";
     } else {
         if (config.scrape != ctx_->scrape_enabled || config.ipc != ctx_->ipc_enabled) {
             NIXL_WARN << "DOCA Telemetry exporter for agent '" << agent_name_
@@ -346,6 +361,14 @@ nixlTelemetryDocaExporter::nixlTelemetryDocaExporter(
                       << "); NIXL uses one shared context per process, so the first agent's "
                          "backend selection is kept and this request is ignored";
         }
+        if (config.source_id != ctx_->source_id || config.source_tag != ctx_->source_tag) {
+            NIXL_WARN << "DOCA Telemetry exporter for agent '" << agent_name_
+                      << "' requested source id '" << config.source_id << "' and tag '"
+                      << config.source_tag
+                      << "', but the shared process-wide DOCA context already uses source id '"
+                      << ctx_->source_id << "' and tag '" << ctx_->source_tag
+                      << "'; the first agent's values are kept";
+        }
         NIXL_INFO << "DOCA Telemetry exporter for agent '" << agent_name_
                   << "' sharing existing context (" << ctx_->backend_desc << ")";
     }
@@ -354,6 +377,16 @@ nixlTelemetryDocaExporter::nixlTelemetryDocaExporter(
 nixlTelemetryDocaExporter::~nixlTelemetryDocaExporter() {
     const std::lock_guard lock(g_ctx_mutex);
     ctx_.reset();
+}
+
+const std::string &
+nixlTelemetryDocaExporter::sourceId() const noexcept {
+    return ctx_->source_id;
+}
+
+const std::string &
+nixlTelemetryDocaExporter::sourceTag() const noexcept {
+    return ctx_->source_tag;
 }
 
 uint64_t
@@ -395,7 +428,7 @@ nixlTelemetryDocaExporter::appendErrorCounterSample(const nixlTelemetryEvent &ev
     const char *label_values[] = {agent_name_.c_str(), status};
     return doca_telemetry_exporter_metrics_add_counter_increment(ctx_->source,
                                                                  timestamp,
-                                                                 "agent_errors_total",
+                                                                 telemetry_error_family_name,
                                                                  event.value_,
                                                                  ctx_->error_label_set_id,
                                                                  label_values);

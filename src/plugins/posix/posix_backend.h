@@ -33,19 +33,6 @@
 using nixlPosixFileMD = nixlFilePathMD;
 
 class nixlPosixBackendReqH : public nixlBackendReqH {
-private:
-    const nixl_xfer_op_t &operation; // The transfer operation (read/write)
-    const nixl_meta_dlist_t &local; // Local memory descriptor list
-    const nixl_meta_dlist_t &remote; // Remote memory descriptor list
-    const int queue_depth_; // Queue depth for async I/O
-    int num_confirmed_ios_; // Number of confirmed IOs
-    std::unique_ptr<nixlPosixIOQueue> &io_queue_; // Async I/O queue instance
-
-    void
-    ioDone(uint32_t data_size, int error);
-    static void
-    ioDoneClb(void *ctx, uint32_t data_size, int error);
-
 public:
     nixlPosixBackendReqH(const nixl_xfer_op_t &operation,
                          const nixl_meta_dlist_t &local,
@@ -60,6 +47,18 @@ public:
     nixl_status_t
     checkXfer();
 
+    // True once every completion (confirmed I/Os and expected cancellations) has been reaped.
+    bool
+    isComplete() const {
+        return num_confirmed_ios_ == enqueued_ios_ && cancels_expected_ == cancels_seen_;
+    }
+
+    // Best-effort abort of outstanding I/O. Queued entries fail synchronously; in-flight
+    // ones get async cancels that isComplete() waits for. Idempotent, and a no-op on a
+    // complete request. Returns the number of async cancellations requested.
+    unsigned
+    requestCancellation();
+
     // Exception classes
     class exception : public std::exception {
     private:
@@ -73,6 +72,29 @@ public:
             return code_;
         }
     };
+
+private:
+    void
+    ioDone(uint32_t data_size, int error);
+    static void
+    ioDoneClb(void *ctx, uint32_t data_size, int error);
+    void
+    cancelDone();
+    static void
+    cancelDoneClb(void *ctx);
+    nixl_status_t
+    queueResult(nixl_status_t queue_result);
+
+    const nixl_xfer_op_t &operation; // The transfer operation (read/write)
+    const nixl_meta_dlist_t &local; // Local memory descriptor list
+    const nixl_meta_dlist_t &remote; // Remote memory descriptor list
+    int enqueued_ios_ = 0; // Number of accepted IOs
+    int num_confirmed_ios_ = 0; // Number of confirmed IOs
+    bool transfer_failed_ = false; // Set if any io of the current transfer failed
+    bool cancellation_requested_ = false; // Set when cancellation begins for this transfer
+    unsigned cancels_expected_ = 0; // Cancellations expected for this request
+    unsigned cancels_seen_ = 0; // Cancellations completed for this request
+    std::unique_ptr<nixlPosixIOQueue> &io_queue_; // Async I/O queue instance
 };
 
 class nixlPosixEngine : public nixlBackendEngine {
@@ -83,6 +105,9 @@ private:
     nixl::PathModeDevIdRegistry path_mode_devids_;
 
 public:
+    static nixl_b_params_t
+    getPluginParams();
+
     nixlPosixEngine(const nixlBackendInitParams *init_params);
     virtual ~nixlPosixEngine() = default;
 
