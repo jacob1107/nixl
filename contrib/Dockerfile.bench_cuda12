@@ -1,0 +1,494 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# NIXL+UCCL+nixlbench（CUDA 12，manylinux_2_28）：= Dockerfile.full_cuda12 去掉
+# 轮子矩阵段，保 nixlbench 基准工具（ETCD 运行时编入）与 etcd 服务端二进制。
+# etcd/gRPC 栈放独立 stage（从 manylinux 基座直接起，BuildKit 使其与 nixl+uccl
+# 主流水线并行编译，gRPC 的 25-40 分钟不占串行墙钟）；NIXL 构建层结束后才
+# COPY 进最终镜像——虽无轮子层，仍与 full_cuda12 同形：libnixl 不吃进
+# gRPC/abseil 依赖链。指令级修复须在 core/uccl/wheels/bench/full 各文件间同步。
+#
+# 网络（国内）：dnf 华为云、uv/PyPI TUNA、github 断流靠重试；小写代理 ARG
+# 传入即全走代理（huaweicloud/tuna 域名须进 no_proxy 直连）。需要 BuildKit
+# （docker 23+ 默认；旧版 export DOCKER_BUILDKIT=1，ccache cache mount 用）。
+# UCCL commit 钉 NIXL v1.5.0 CI 的 da914a20（插件用变长通知 API，不能回退旧
+# commit）。
+#
+# 用法（仓库根目录执行）：
+#   docker build -f contrib/Dockerfile.bench_cuda12 -t nixl-bench:cu12 .
+# 产物：/usr/local/nixl（本体+UCCL 插件）、/usr/local/nixlbench/bin/nixlbench
+#   （ETCD 运行时已编入）、/usr/local/bin/{etcd,etcdctl}。
+# 容器内起 etcd 服务（nixlbench 的 ETCD 运行时 / master-worker 模式用）：
+#   etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://127.0.0.1:2379
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG ARCH="x86_64"
+# CUDA toolkit donor：只 COPY 其 /usr/local/cuda；ubuntu 味即可（CUDA 12.4 原生
+# 支持 RHEL8、glibc 2.28 可跑），nvcc 报 GLIBC 缺失就换 12.4.1-devel-ubi8。
+ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
+ARG BASE_IMAGE_TAG="12.4.1-devel-ubuntu22.04"
+ARG MANYLINUX_IMAGE="quay.io/pypa/manylinux_2_28"
+ARG MANYLINUX_IMAGE_TAG="2026.06.06-1"
+
+# 小写代理直通：stage 开头 ENV 固化，传入即走代理。
+ARG http_proxy
+ARG https_proxy
+ARG all_proxy
+ARG no_proxy
+
+# --- 阶段一：CUDA donor（只取 toolkit） ---------------------------------------------------
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS cuda
+ENV http_proxy=$http_proxy
+ENV https_proxy=$https_proxy
+ENV all_proxy=$all_proxy
+ENV no_proxy=$no_proxy
+
+# --- 阶段二：NIXL + UCCL 环境（与 Dockerfile.uccl_cuda12 同配方） ---------------------------
+FROM ${MANYLINUX_IMAGE}_${ARCH}:${MANYLINUX_IMAGE_TAG} AS build
+ENV http_proxy=$http_proxy
+ENV https_proxy=$https_proxy
+ENV all_proxy=$all_proxy
+ENV no_proxy=$no_proxy
+ARG ARCH="x86_64"
+ARG NPROC
+ARG DEFAULT_PYTHON_VERSION="3.12"
+ARG CUDA_VERSION="12.4"
+ARG UCCL_REPO="https://github.com/uccl-project/uccl.git"
+ARG UCCL_REF="da914a2054c29725464803e379bb3b98de90dfa1"
+ARG NIXL_PREFIX="/usr/local/nixl"
+# el8 的 64 位库在 lib64（非 ubuntu 的 lib/<arch>-linux-gnu）。
+ARG NIXL_PLUGIN_DIR="${NIXL_PREFIX}/lib64/plugins"
+# nvcc 12.4 最高 sm_90；"auto"（80..120）会构建失败。
+ARG CUDA_ARCH_LIST="80,86,89,90"
+
+COPY --from=cuda /usr/local/cuda /usr/local/cuda
+RUN ln -sfn /usr/local/cuda /usr/local/cuda-${CUDA_VERSION}
+ENV CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:${LD_LIBRARY_PATH:-}
+# el8 默认 gcc 8 太旧（NIXL/UCCL 要 C++20），CUDA 也要求 gcc <= 14——toolset-14
+# 前置。
+ENV PATH=/opt/rh/gcc-toolset-14/root/usr/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}
+
+# dnf 换源华为云 + 构建依赖，单层（sed 前置让首次元数据即走镜像；装完
+# synergy/epel-release 后幂等二跑 sed，baseurl 的 /almalinux/ 路径一并吃掉；
+# epel.repo 只有 metalink、整文件重写为镜像源；grep 断言换源真的发生；
+# powertools/CRB 兜底启用；dnf.conf 并发 10 + timeout/minrate 掐断涓流 +
+# retries；层首尾 clean all）。UCCL 构建依赖：zlib/elfutils/libfabric（cxi
+# 传输的头，仅编译期）/libibverbs（头文件编译期硬依赖：上游 util/common.h
+# 无条件 include efadv.h；运行库不进 DT_NEEDED）、python3-devel（上游 Makefile
+# 的 python3-config 探测）。el8 正名 gcc-toolset-14-gcc-c++ /
+# elfutils-libelf-devel（带 ++ 的写法是 RHEL10 名，el8 没有）。ccache 供
+# meson 层提速（cache mount）。
+RUN set -eux; \
+    printf 'max_parallel_downloads=10\ntimeout=30\nminrate=10000\nretries=20\n' >> /etc/dnf/dnf.conf; \
+    dnf clean all; \
+    sed -i -E \
+        -e 's|^mirrorlist=|#mirrorlist=|g' \
+        -e 's|^#*[[:space:]]*baseurl=https?://repo[.]almalinux[.]org/almalinux|baseurl=https://mirrors.huaweicloud.com/almalinux|g' \
+        /etc/yum.repos.d/almalinux*.repo; \
+    dnf install -y dnf-plugins-core almalinux-release-synergy epel-release; \
+    sed -i -E \
+        -e 's|^mirrorlist=|#mirrorlist=|g' \
+        -e 's|^#*[[:space:]]*baseurl=https?://repo[.]almalinux[.]org/almalinux|baseurl=https://mirrors.huaweicloud.com/almalinux|g' \
+        /etc/yum.repos.d/almalinux*.repo; \
+    printf '%s\n' \
+        '[epel]' \
+        'name=Extra Packages for Enterprise Linux 8 - $basearch' \
+        'baseurl=https://mirrors.huaweicloud.com/epel/8/Everything/$basearch/' \
+        'enabled=1' \
+        'gpgcheck=1' \
+        'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-8' \
+        > /etc/yum.repos.d/epel.repo; \
+    rm -f /etc/yum.repos.d/epel-testing.repo /etc/yum.repos.d/epel-testing-modular.repo \
+          /etc/yum.repos.d/epel-modular.repo; \
+    grep -q 'mirrors.huaweicloud.com/almalinux' /etc/yum.repos.d/almalinux*.repo; \
+    grep -q 'mirrors.huaweicloud.com/epel' /etc/yum.repos.d/epel.repo; \
+    dnf config-manager --set-enabled powertools \
+        || dnf config-manager --set-enabled crb \
+        || { echo 'ERROR: powertools/CRB repo not found'; exit 1; }; \
+    dnf install -y \
+        gcc-toolset-14 gcc-toolset-14-gcc-c++ \
+        make \
+        ccache \
+        git curl ca-certificates pkgconf-pkg-config \
+        python3-devel \
+        zlib-devel elfutils-libelf-devel libfabric-devel \
+        libibverbs-devel; \
+    dnf clean all && rm -rf /var/cache/dnf
+
+# uv 从 PyPI 装（不用 ghcr COPY——BuildKit 每次都要连 ghcr 解析元数据，国内常
+# TLS 超时）；--prefix 落进默认 PATH，-i 走 TUNA。
+RUN PYS="cp$(echo ${DEFAULT_PYTHON_VERSION} | tr -d .)" && \
+    /opt/python/${PYS}-${PYS}/bin/python${DEFAULT_PYTHON_VERSION} -m pip install \
+        --no-cache-dir --prefix=/usr/local \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple uv
+
+# 主 venv：meson 工具链 + pybind11（python 绑定编译）+ nanobind（UCCL p2p 扩展）
+# + numpy（_api.py 硬依赖，冒烟 import 用）。auditwheel/tomlkit 等属轮子层，
+# 不带。
+RUN PYS="cp$(echo ${DEFAULT_PYTHON_VERSION} | tr -d .)" && \
+    uv venv /workspace/.venv --python /opt/python/${PYS}-${PYS}/bin/python${DEFAULT_PYTHON_VERSION} && \
+    uv pip install --python /workspace/.venv/bin/python \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        meson ninja pybind11 nanobind numpy
+ENV VIRTUAL_ENV=/workspace/.venv
+ENV PATH=/workspace/.venv/bin:${PATH}
+
+# --- UCCL P2P 引擎 ------------------------------------------------------------------------
+# libuccl_p2p.so + uccl_engine.h 装进 /usr/local（find_library('uccl_p2p') 解析，
+# /usr/local/lib 的 ldconfig 注册同层完成——运行期 dlopen 靠它，el8 默认不搜
+# /usr/local/lib）。驱动 stub 软链到 -lcuda 预期位置。关键：引擎真实引用
+# PyGILState_Ensure/PyErr_CheckSignals（Linux 扩展惯例不链 libpython、由宿主
+# 解释器解析），上游 Makefile 却会从平台 python3-config 拼出不存在的
+# -lpython3.6m——make 命令行覆盖 PYTHON_LDFLAGS/PYTHON_LIB 把 -lpython* 整个
+# 拿掉（保留非 python 尾巴），CXX 加 -Wl,--as-needed 挡未引用库，install 后
+# readelf 断言 DT_NEEDED 无 libpython（上游漂移时在本层报错，不发货坏产物）。
+RUN [ -e /usr/local/cuda/lib64/libcuda.so ] || \
+        ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so; \
+    cd /tmp && \
+    for i in 1 2 3 4 5; do \
+        rm -rf uccl && git clone ${UCCL_REPO} uccl && break; \
+        echo "=== uccl clone attempt $i failed, retrying in 10s ==="; sleep 10; \
+    done && \
+    test -d uccl/.git && \
+    cd uccl && git checkout ${UCCL_REF} && \
+    cd p2p && \
+    make -j${NPROC:-$(nproc)} CXX="g++ -Wl,--as-needed" \
+        PYTHON_LDFLAGS="-lpthread -ldl -lutil -lm" PYTHON_LIB= && \
+    make install CXX="g++ -Wl,--as-needed" \
+        PYTHON_LDFLAGS="-lpthread -ldl -lutil -lm" PYTHON_LIB= && \
+    test -f /usr/local/lib/libuccl_p2p.so && \
+    if readelf -d /usr/local/lib/libuccl_p2p.so | grep libpython; then \
+        echo 'ERROR: libuccl_p2p.so 的 DT_NEEDED 仍含 libpython（PYTHON_LDFLAGS/PYTHON_LIB 覆盖失效？）'; \
+        exit 1; \
+    fi && \
+    echo /usr/local/lib > /etc/ld.so.conf.d/uccl-p2p.conf && \
+    ldconfig && \
+    cd /tmp && rm -rf uccl
+
+# nvcc 12.4 的宿主编译器只支持到 GCC 13.2，PATH 前置的 gcc-toolset-14(14.2) 会被
+# cudafe #error 拒绝——在 venv bin（PATH 上唯一先于 cuda/bin 的位置）放 nvcc 包装
+# 脚本钉 -ccbin 到 gcc-toolset-12（基座自带；只带 C 件，缺 cc1plus 故层内补装，
+# 主 dnf 层缓存不动）。层内空 kernel 冒烟＝meson sanity 前置。本分支 src/ 无
+# .cu，ccbin 只服务 sanity。
+RUN dnf install -y gcc-toolset-12-gcc-c++ \
+    && dnf clean all && rm -rf /var/cache/dnf && \
+    if [ -x /opt/rh/gcc-toolset-12/root/usr/bin/gcc ]; then \
+        CCBIN=/opt/rh/gcc-toolset-12/root/usr/bin/gcc; \
+    elif [ -x /usr/bin/gcc ]; then \
+        CCBIN=/usr/bin/gcc; \
+    else \
+        echo 'ERROR: 找不到 CUDA 12.4 可用的宿主 gcc（gcc-toolset-12 或系统 gcc）'; \
+        exit 1; \
+    fi && \
+    printf '#!/bin/sh\nexec /usr/local/cuda/bin/nvcc -ccbin %s "$@"\n' "$CCBIN" \
+        > /workspace/.venv/bin/nvcc && \
+    chmod +x /workspace/.venv/bin/nvcc && \
+    printf '__global__ void smoke() {}\n' > /tmp/nvcc_smoke.cu && \
+    nvcc -c /tmp/nvcc_smoke.cu -o /tmp/nvcc_smoke.o && \
+    rm -f /tmp/nvcc_smoke.cu /tmp/nvcc_smoke.o && \
+    echo "nvcc wrapper OK (ccbin=$CCBIN)"
+
+WORKDIR /workspace/nixl
+# README/LICENSE 是 nixl-meta 子目录 configure 的 fs.copyfile 输入，缺了 meson
+# setup 直接失败；pyproject.toml 只有轮子流程用，这里不拷。
+COPY meson.build meson_options.txt README.md LICENSE ./
+COPY subprojects ./subprojects
+# 三个 wrap（abseil-cpp/asio/tomlplusplus）预下载进 packagecache（哈希校验，
+# .wrap 不变则永久缓存），下方 meson setup --wrap-mode=nodownload 零联网。URL
+# 用 wrapdb 官方再托管（github /archive 按需重打包、哈希不稳）；升级 .wrap 须
+# 同步本层 URL/哈希。github 断流重试 5 次，失败单独重跑本层即可。
+RUN mkdir -p subprojects/packagecache && cd subprojects/packagecache && \
+    for spec in \
+      "https://github.com/mesonbuild/wrapdb/releases/download/abseil-cpp_20250814.1-1/abseil-cpp-20250814.1.tar.gz|abseil-cpp-20250814.1.tar.gz|1692f77d1739bacf3f94337188b78583cf09bab7e420d2dc6c5605a4f86785a1" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/abseil-cpp_20250814.1-1/abseil-cpp-20250814.1-1_patch.zip|abseil-cpp-20250814.1-1_patch.zip|f44ad4d72ff2919a6a48cf0887f69aef34c338bfdd8931153596e3766d75f654" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/asio_1.30.2-2/asio-1.30.2.tar.gz|asio-1.30.2.tar.gz|12e7bb4dada8bc1191de9d550a59ee658ce4e645ffc97c911c099ab4e8699d55" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/asio_1.30.2-2/asio-1.30.2-2_patch.zip|asio-1.30.2-2_patch.zip|8bed3693016874b097e4d902c4ca8daf1b6abf1b5a56b0c5c02827d4e0747ddb" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/tomlplusplus_3.4.0-1/tomlplusplus-3.4.0.tar.gz|tomlplusplus-3.4.0.tar.gz|8517f65938a4faae9ccf8ebb36631a38c1cadfb5efa85d9a72e15b9e97d25155" \
+    ; do \
+      url="${spec%%|*}"; rest="${spec#*|}"; out="${rest%%|*}"; want="${rest#*|}"; ok=0; \
+      for i in 1 2 3 4 5; do \
+        curl -fsSL --connect-timeout 15 -o "$out" "$url" && { ok=1; break; }; \
+        echo "重试 $i/5：$out（github 直连偶发断流）"; sleep 3; \
+      done; \
+      [ "$ok" = 1 ] || { echo "ERROR: 下载失败 $url"; exit 1; }; \
+      echo "$want  $out" | sha256sum -c - || exit 1; \
+    done
+COPY src ./src
+
+ENV LD_LIBRARY_PATH=${NIXL_PREFIX}/lib64:${LD_LIBRARY_PATH}
+
+# 原生 meson 构建：-Denable_plugins=UCCL 显式启用（引擎缺失直接报错）。不产
+# 轮子故不开 -Drelease_wheel。etcd 栈此刻尚不可见（下方 bench stage 才 COPY 进
+# 来）——libnixl 因此不含 gRPC/abseil 依赖链，与 full_cuda12 的轮子形状一致。
+# 构建后断言：libnixl 在位、UCCL 插件在位、venv 可 import。
+RUN --mount=type=cache,target=/workspace/.cache/ccache \
+    export CCACHE_DIR=/workspace/.cache/ccache CC='ccache gcc' CXX='ccache g++' && \
+    ccache -M 20G && \
+    rm -rf build && \
+    meson setup build \
+        --prefix=${NIXL_PREFIX} \
+        --buildtype=release \
+        --wrap-mode=nodownload \
+        -Dnixl_cuda_arch_list=${CUDA_ARCH_LIST} \
+        -Denable_plugins=UCCL && \
+    ninja -j${NPROC:-$(nproc)} -C build && \
+    ninja -j${NPROC:-$(nproc)} -C build install && \
+    echo "${NIXL_PREFIX}/lib64" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "${NIXL_PLUGIN_DIR}" >> /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig && \
+    ls ${NIXL_PLUGIN_DIR} | grep -q "libplugin_UCCL.so" || \
+        { echo "ERROR: missing plugin UCCL"; exit 1; } && \
+    python -c "import nixl_cu12; print('nixl + UCCL OK')"
+
+ENV NIXL_PLUGIN_DIR=${NIXL_PLUGIN_DIR}
+
+# --- 阶段三：etcd/gRPC 栈（独立并行 stage） ----------------------------------------------
+# nixlbench 的 ETCD 运行时需要 etcd-cpp-api（链 gRPC/abseil）与 gflags，etcd 服务
+# 端取官方静态二进制。从 manylinux 基座直接起（不 FROM build：本栈不需要
+# UCCL/CUDA/Python，BuildKit 使其与上面的 nixl+uccl 流水线并行编译）。全部装进
+# 本 stage 的 /usr/local——该基座无 CUDA/nixl，/usr/local 干净，最终镜像整目录
+# COPY 合并无冲突；NIXL 构建层结束前对本栈不可见（形状约束，见上方）。boost/
+# libssl 等系统运行库不随 COPY 走，bench 段单独补装。换源配方同 build stage
+# （华为云），合并为单层。
+FROM ${MANYLINUX_IMAGE}_${ARCH}:${MANYLINUX_IMAGE_TAG} AS etcd_stack
+ENV http_proxy=$http_proxy
+ENV https_proxy=$https_proxy
+ENV all_proxy=$all_proxy
+ENV no_proxy=$no_proxy
+ARG NPROC
+
+RUN set -eux; \
+    printf 'max_parallel_downloads=10\ntimeout=30\nminrate=10000\nretries=20\n' >> /etc/dnf/dnf.conf; \
+    dnf clean all; \
+    sed -i -E \
+        -e 's|^mirrorlist=|#mirrorlist=|g' \
+        -e 's|^#*[[:space:]]*baseurl=https?://repo[.]almalinux[.]org/almalinux|baseurl=https://mirrors.huaweicloud.com/almalinux|g' \
+        /etc/yum.repos.d/almalinux*.repo; \
+    dnf install -y dnf-plugins-core almalinux-release-synergy epel-release; \
+    sed -i -E \
+        -e 's|^mirrorlist=|#mirrorlist=|g' \
+        -e 's|^#*[[:space:]]*baseurl=https?://repo[.]almalinux[.]org/almalinux|baseurl=https://mirrors.huaweicloud.com/almalinux|g' \
+        /etc/yum.repos.d/almalinux*.repo; \
+    printf '%s\n' \
+        '[epel]' \
+        'name=Extra Packages for Enterprise Linux 8 - $basearch' \
+        'baseurl=https://mirrors.huaweicloud.com/epel/8/Everything/$basearch/' \
+        'enabled=1' \
+        'gpgcheck=1' \
+        'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-8' \
+        > /etc/yum.repos.d/epel.repo; \
+    rm -f /etc/yum.repos.d/epel-testing.repo /etc/yum.repos.d/epel-testing-modular.repo \
+          /etc/yum.repos.d/epel-modular.repo; \
+    grep -q 'mirrors.huaweicloud.com/almalinux' /etc/yum.repos.d/almalinux*.repo; \
+    grep -q 'mirrors.huaweicloud.com/epel' /etc/yum.repos.d/epel.repo; \
+    dnf config-manager --set-enabled powertools \
+        || dnf config-manager --set-enabled crb \
+        || { echo 'ERROR: powertools/CRB repo not found'; exit 1; }; \
+    dnf install -y \
+        gcc-toolset-14 gcc-toolset-14-gcc-c++ make git curl ca-certificates \
+        boost boost-devel openssl openssl-devel \
+        protobuf-compiler protobuf-devel zlib zlib-devel; \
+    dnf clean all && rm -rf /var/cache/dnf
+
+# gcc 8 编不了 C++20 的 gRPC/abseil——toolset-14 前置；cmake 用基座自带 4.x，
+# 放宽其对 <3.5 的 cmake_minimum_required 的拒收。
+ENV PATH=/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}
+ENV CMAKE_POLICY_VERSION_MINIMUM=3.5
+WORKDIR /tmp
+
+# abseil lts_2025_08_14 共享库（gRPC 依赖；与 NIXL 核心的 wrap 版 abseil 互不
+# 相干，本份只服务 gRPC/etcd-cpp，不进任何产物）。浅克隆，断流重试 5 次。
+RUN ok=0; \
+    for i in 1 2 3 4 5; do \
+        rm -rf abseil-cpp && \
+        git clone --depth 1 --branch lts_2025_08_14 https://github.com/abseil/abseil-cpp.git && { ok=1; break; }; \
+        echo "重试 $i/5：abseil 克隆（github 直连偶发断流）"; sleep 3; \
+    done; \
+    [ "$ok" = 1 ] || { echo "ERROR: abseil 克隆失败"; exit 1; }; \
+    cd abseil-cpp && mkdir -p build && cd build && \
+    cmake .. \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_STANDARD=20 \
+        -DBUILD_SHARED_LIBS=ON \
+        -DABSL_PROPAGATE_CXX_STD=ON \
+        -DABSL_ENABLE_INSTALL=ON && \
+    make -j${NPROC:-$(nproc)} && make install && ldconfig && \
+    cd /tmp && rm -rf abseil-cpp
+
+# gRPC v1.73.0：SSL/ZLIB 用系统包、ABSL 用上面 /usr/local 共享库、protobuf 走
+# module 自带（el8 的 3.5 太老）。--recurse-submodules 必须保留。el8 产物落
+# /usr/local/lib64。
+RUN ok=0; \
+    for i in 1 2 3 4 5; do \
+        rm -rf grpc && git clone --recurse-submodules -b v1.73.0 --depth 1 --shallow-submodules https://github.com/grpc/grpc && { ok=1; break; }; \
+        echo "重试 $i/5：gRPC 克隆（github 直连偶发断流）"; sleep 3; \
+    done; \
+    [ "$ok" = 1 ] || { echo "ERROR: gRPC 克隆失败"; exit 1; }; \
+    cd grpc && mkdir -p cmake/build && cd cmake/build && \
+    cmake \
+        -DgRPC_INSTALL=ON \
+        -DgRPC_BUILD_TESTS=OFF \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_CXX_STANDARD=20 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DgRPC_SSL_PROVIDER=package \
+        -DgRPC_ABSL_PROVIDER=package \
+        -DgRPC_PROTOBUF_PROVIDER=module \
+        -DgRPC_ZLIB_PROVIDER=package ../.. && \
+    make -j${NPROC:-$(nproc)} && make install && ldconfig && \
+    cd /tmp && rm -rf grpc
+
+# gflags v2.2.2（nixlbench 必需；REGISTER_PKGCONFIG=ON 让 meson 的
+# dependency('gflags') 走 pkg-config 命中，默认不装 .pc）。
+RUN ok=0; \
+    for i in 1 2 3 4 5; do \
+        rm -rf gflags && git clone --depth 1 --branch v2.2.2 https://github.com/gflags/gflags.git && { ok=1; break; }; \
+        echo "重试 $i/5：gflags 克隆（github 直连偶发断流）"; sleep 3; \
+    done; \
+    [ "$ok" = 1 ] || { echo "ERROR: gflags 克隆失败"; exit 1; }; \
+    cd gflags && mkdir build && cd build && \
+    cmake .. \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_STATIC_LIBS=OFF \
+        -DREGISTER_PKGCONFIG=ON && \
+    make -j${NPROC:-$(nproc)} && make install && ldconfig && \
+    cd /tmp && rm -rf gflags
+
+# etcd-cpp-api v0.15.4：CORE_ONLY 跳过 cpprest/async 栈；配置模板里的
+# find_dependency(cpprestsdk) 一行 sed 删掉（同上游修法）。/usr/local/lib64 的
+# ldconfig 注册（el8 默认不搜）。
+# GPR_ASSERT 修复（对 gRPC v1.73.0）：1.73 起公共头 grpc/support/log.h 删除了
+# GPR_ASSERT 宏，而 v0.15.4 的 src/v3/Action.cpp:101（全树唯一用处）仍在调用。
+# 上游 master 已修（commit 216b86f / PR #281：#ifndef 兜底宏）但未随任何 tag
+# 发布，钉 v0.15.4 的本文件必中；此处 sed 把同款兜底宏插进 Action.cpp 头部，
+# #ifndef 自守卫，将来 bump 到含修复的 tag 也不会冲突。
+RUN ok=0; \
+    for i in 1 2 3 4 5; do \
+        rm -rf etcd-cpp-apiv3 && git clone --depth 1 --branch v0.15.4 https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git && { ok=1; break; }; \
+        echo "重试 $i/5：etcd-cpp 克隆（github 直连偶发断流）"; sleep 3; \
+    done; \
+    [ "$ok" = 1 ] || { echo "ERROR: etcd-cpp 克隆失败"; exit 1; }; \
+    cd etcd-cpp-apiv3 && \
+    sed -i '/^find_dependency(cpprestsdk)$/d' etcd-cpp-api-config.in.cmake && \
+    sed -i 's|^#include "etcd/v3/Action.hpp"$|&\n#include <cstdio>\n#include <cstdlib>\n\n#ifndef GPR_ASSERT\n#define GPR_ASSERT(x) if (!(x)) { fprintf(stderr, "%s:%d assert failed\\n", __FILE__, __LINE__); abort(); }\n#endif\n|' src/v3/Action.cpp && \
+    grep -q '^#ifndef GPR_ASSERT' src/v3/Action.cpp || \
+        { echo "ERROR: GPR_ASSERT 兜底宏未插入（上游 Action.cpp 锚点漂移？）"; exit 1; } && \
+    mkdir build && cd build && \
+    cmake .. \
+        -DBUILD_ETCD_CORE_ONLY=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_STANDARD=20 \
+        -DETCD_CMAKE_CXX_STANDARD=20 && \
+    make -j${NPROC:-$(nproc)} && make install && \
+    echo /usr/local/lib64 > /etc/ld.so.conf.d/etcd-stack.conf && \
+    echo /usr/local/lib >> /etc/ld.so.conf.d/etcd-stack.conf && \
+    ldconfig && \
+    cd /tmp && rm -rf etcd-cpp-apiv3
+
+# etcd 服务端二进制（el8/EPEL 无包；Go 静态链无运行时依赖）。v3.5 起 etcdctl
+# 默认 v3 API。
+RUN ok=0; \
+    for i in 1 2 3 4 5; do \
+        curl -fsSL --connect-timeout 15 -o /tmp/etcd.tar.gz \
+            https://github.com/etcd-io/etcd/releases/download/v3.5.16/etcd-v3.5.16-linux-amd64.tar.gz && { ok=1; break; }; \
+        echo "重试 $i/5：etcd 下载（github 直连偶发断流）"; sleep 3; \
+    done; \
+    [ "$ok" = 1 ] || { echo "ERROR: etcd 下载失败"; exit 1; }; \
+    tar -xzf /tmp/etcd.tar.gz -C /tmp && \
+    install -m 755 /tmp/etcd-v3.5.16-linux-amd64/etcd \
+                   /tmp/etcd-v3.5.16-linux-amd64/etcdctl /usr/local/bin/ && \
+    rm -rf /tmp/etcd.tar.gz /tmp/etcd-v3.5.16-linux-amd64 && \
+    etcd --version | head -1 && \
+    etcdctl version | head -1
+
+# --- 阶段四：bench（NIXL 环境 + etcd 栈 + nixlbench） --------------------------------------
+# etcd 栈此刻才进入最终镜像（NIXL 构建层已结束，libnixl 不受影响）。COPY 整目录
+# 合并：etcd_stack 的 /usr/local 只有本栈产物（lib64 的 so + include 头 + bin
+# 的 etcd/etcdctl），与 build stage 的 /usr/local（cuda/nixl/libuccl_p2p/uv）
+# 无同名冲突。boost 运行库（libetcd-cpp-api 的系统依赖）不在 COPY 里、单独
+# 补装；lib64 注册进 ldconfig。
+FROM build AS bench
+ARG NPROC
+
+COPY --from=etcd_stack /usr/local /usr/local
+RUN dnf install -y boost && dnf clean all && rm -rf /var/cache/dnf && \
+    echo /usr/local/lib64 > /etc/ld.so.conf.d/etcd-stack.conf && \
+    echo /usr/local/lib >> /etc/ld.so.conf.d/etcd-stack.conf && \
+    ldconfig
+
+# nixlbench：独立 meson 工程，对着已安装的 NIXL 编（-Dnixl_path），装到 /usr/
+# local/nixlbench/bin。自带 subprojects wrap（asio/tomlplusplus，哈希与根目录
+# 一致）预下载进 packagecache + nodownload 零联网；etcd-cpp-api 探测必须命中
+# （meson 找不到只打一行 message 静默降级，断言 meson log 挡下残废产物）；
+# ucx_path 留空 → kernels 恒关、nvcc 不被调用。el8 的 pkg-config 不搜 /usr/
+# local——PKG_CONFIG_PATH 显式指过去。构建后同层冒烟：nixlbench 在位、链接
+# etcd-cpp-api、ldd 无缺失（libcuda.so.1 驱动运行时注入除外）；不启动
+# nixlbench（构建无 GPU），docker run --gpus all 下可试 "nixlbench --help"。
+COPY benchmark/nixlbench ./benchmark/nixlbench
+ENV PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig:/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}
+RUN set -eux; \
+    mkdir -p benchmark/nixlbench/subprojects/packagecache && \
+    cd benchmark/nixlbench/subprojects/packagecache && \
+    for spec in \
+      "https://github.com/mesonbuild/wrapdb/releases/download/asio_1.30.2-2/asio-1.30.2.tar.gz|asio-1.30.2.tar.gz|12e7bb4dada8bc1191de9d550a59ee658ce4e645ffc97c911c099ab4e8699d55" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/asio_1.30.2-2/asio-1.30.2-2_patch.zip|asio-1.30.2-2_patch.zip|8bed3693016874b097e4d902c4ca8daf1b6abf1b5a56b0c5c02827d4e0747ddb" \
+      "https://github.com/mesonbuild/wrapdb/releases/download/tomlplusplus_3.4.0-1/tomlplusplus-3.4.0.tar.gz|tomlplusplus-3.4.0.tar.gz|8517f65938a4faae9ccf8ebb36631a38c1cadfb5efa85d9a72e15b9e97d25155" \
+    ; do \
+      url="${spec%%|*}"; rest="${spec#*|}"; out="${rest%%|*}"; want="${rest#*|}"; ok=0; \
+      for i in 1 2 3 4 5; do \
+        curl -fsSL --connect-timeout 15 -o "$out" "$url" && { ok=1; break; }; \
+        echo "重试 $i/5：$out（github 直连偶发断流）"; sleep 3; \
+      done; \
+      [ "$ok" = 1 ] || { echo "ERROR: 下载失败 $url"; exit 1; }; \
+      echo "$want  $out" | sha256sum -c - || exit 1; \
+    done && \
+    cd /workspace/nixl/benchmark/nixlbench && \
+    rm -rf nb_build && \
+    meson setup nb_build \
+        --prefix=/usr/local/nixlbench \
+        --buildtype=release \
+        --wrap-mode=nodownload \
+        -Dnixl_path=/usr/local/nixl \
+        -Dcudapath_inc=/usr/local/cuda/include \
+        -Dcudapath_lib=/usr/local/cuda/lib64 && \
+    { grep -q "etcd-cpp-api found: YES" nb_build/meson-logs/meson-log.txt || \
+      { echo "=== ERROR: meson 未探测到 etcd-cpp-api —— nixlbench 的 ETCD 运行时会被静默禁用 ==="; \
+        grep -B2 -A12 "etcd-cpp-api" nb_build/meson-logs/meson-log.txt | tail -80; exit 1; }; } && \
+    ninja -j${NPROC:-$(nproc)} -C nb_build && \
+    ninja -j${NPROC:-$(nproc)} -C nb_build install && \
+    test -x /usr/local/nixlbench/bin/nixlbench && \
+    rm -rf nb_build; \
+    ldd /usr/local/nixlbench/bin/nixlbench | grep -q "etcd-cpp-api"; \
+    if ldd /usr/local/nixlbench/bin/nixlbench | grep -i "not found" | grep -v "libcuda.so.1"; then \
+        echo "ERROR: nixlbench has unresolved shared libs"; exit 1; \
+    fi; \
+    etcd --version | head -1; \
+    etcdctl version | head -1; \
+    echo "nixlbench + etcd OK"
+
+ENV PATH=/usr/local/nixlbench/bin:${PATH}
+
+# 构建产物：/usr/local/nixl（本体+UCCL 插件）、/usr/local/nixlbench/bin/
+# nixlbench、/usr/local/bin/{etcd,etcdctl}。
+LABEL org.opencontainers.image.title="nixl + UCCL + nixlbench environment (CUDA 12, ETCD runtime)"
+LABEL org.opencontainers.image.description="Manylinux_2_28 container with the UCCL engine, a native NIXL install and nixlbench (ETCD runtime enabled) plus the etcd server binary; etcd/gRPC stack builds in a parallel stage and is merged only after the NIXL build layers; wheel-free variant of Dockerfile.full_cuda12"
